@@ -24,7 +24,7 @@ class GeneratedStrategy(bt.Strategy):
              self.logs_list = []
         
         dt = dt or self.datas[0].datetime.date(0)
-        log_msg = f'{dt.isoformat()}, {txt}'
+        log_msg = '%s, %s' % (dt.isoformat(), txt)
         self.logs_list.append(log_msg)
         
         if self.params.printlog or doprint:

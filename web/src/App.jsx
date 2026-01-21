@@ -7,7 +7,17 @@ import BacktestDashboard from './components/BacktestDashboard';
 import HistoryPanel from './components/HistoryPanel';
 import StrategyAnalysis from './components/StrategyAnalysis';
 import StrategyEditor from './components/StrategyEditor';
+import ConceptDashboard from './components/ConceptDashboard';
+import FundDashboard from './components/FundDashboard';
+import DerivativesDashboard from './components/DerivativesDashboard';
+import CommoditiesDashboard from './components/CommoditiesDashboard';
+import StockDashboard from './components/StockDashboard';
+import MarketReplay from './components/tools/MarketReplay';
+import MacroCalendar from './components/tools/MacroCalendar';
+import SentimentRadar from './components/tools/SentimentRadar';
+import RiskCenter from './components/tools/RiskCenter';
 import './App.css';
+import { LanguageProvider } from './contexts/LanguageContext';
 
 const InnerApp = () => {
     const { message } = AntdApp.useApp();
@@ -59,6 +69,17 @@ const InnerApp = () => {
         }
 
         switch (activeKey) {
+            // --- Market Views ---
+            case '9':
+                return <StockDashboard />;
+            case '6':
+                return <FundDashboard />;
+            case '7':
+                return <DerivativesDashboard />;
+            case '8':
+                return <CommoditiesDashboard />;
+
+            // --- Quant Tools ---
             case '1':
                 return (
                     <BacktestDashboard 
@@ -67,12 +88,27 @@ const InnerApp = () => {
                         onStrategyApplied={handleStrategyApplied}
                     />
                 );
-            case '2':
-                return <HistoryPanel symbols={symbols} />;
             case '3':
                 return <StrategyAnalysis onApplyStrategy={handleApplyStrategy} />;
             case '4':
                 return <StrategyEditor />;
+            case '2':
+                return <HistoryPanel symbols={symbols} />;
+
+            // --- Advanced Tools ---
+            case '10':
+                return <MarketReplay />;
+            case '11':
+                return <MacroCalendar />;
+            case '12':
+                return <SentimentRadar />;
+            case '13':
+                return <RiskCenter />;
+
+            // --- Wealth ---
+            case '5':
+                return <ConceptDashboard />;
+
             default:
                 return (
                     <BacktestDashboard 
@@ -93,20 +129,21 @@ const InnerApp = () => {
 
 const App = () => {
     return (
-        <ConfigProvider
-            theme={{
-                algorithm: theme.darkAlgorithm,
-                token: {
-                    colorPrimary: '#1890ff',
-                    borderRadius: 2,
-                    colorBgContainer: '#141414',
-                },
-            }}
-        >
-            <AntdApp>
-                <InnerApp />
-            </AntdApp>
-        </ConfigProvider>
+        <LanguageProvider>
+            <ConfigProvider
+                theme={{
+                    algorithm: theme.darkAlgorithm,
+                    token: {
+                        colorPrimary: '#1890ff',
+                        colorBgContainer: '#141414',
+                    },
+                }}
+            >
+                <AntdApp>
+                    <InnerApp />
+                </AntdApp>
+            </ConfigProvider>
+        </LanguageProvider>
     );
 };
 

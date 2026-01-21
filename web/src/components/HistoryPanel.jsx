@@ -119,7 +119,7 @@ const HistoryPanel = ({ symbols }) => {
 
     const deleteRecord = async (id) => {
         try {
-            await axios.delete(`http://localhost:8000/api/backtest/${id}`);
+            await axios.delete(`${API_BASE_URL}/api/backtest/${id}`);
             message.success("删除成功");
             fetchHistory(pagination.current, pagination.pageSize);
             fetchStats();

@@ -1,0 +1,67 @@
+:root {
+  /* ==========================================================================
+     Color Palette - Deep Space & Neon
+     ========================================================================== */
+  
+  /* Backgrounds */
+  --color-bg-base: #000000;
+  --color-bg-surface: #141414;
+  --color-bg-surface-glass: rgba(20, 20, 20, 0.7);
+  --color-bg-panel: #1f1f1f;
+
+  /* Brand Colors */
+  --color-primary: #2979FF;      /* Electric Blue - Intelligence */
+  --color-primary-dim: rgba(41, 121, 255, 0.2);
+  --color-secondary: #00E676;    /* Neon Green - Profit/Success */
+  --color-secondary-dim: rgba(0, 230, 118, 0.2);
+  --color-accent: #D500F9;       /* Cyber Purple - Special/AI */
+  
+  /* Functional Colors */
+  --color-success: #00E676;
+  --color-warning: #FFAB00;
+  --color-danger: #FF1744;
+  --color-info: #00B0FF;
+
+  /* Text Colors */
+  --color-text-primary: rgba(255, 255, 255, 0.95);
+  --color-text-secondary: rgba(255, 255, 255, 0.65);
+  --color-text-disabled: rgba(255, 255, 255, 0.35);
+
+  /* ==========================================================================
+     Typography
+     ========================================================================== */
+  --font-sans: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+  --font-mono: 'JetBrains Mono', 'Roboto Mono', 'SF Mono', Consolas, monospace;
+
+  /* ==========================================================================
+     Spacing & Layout
+     ========================================================================== */
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-xxl: 48px;
+
+  --radius-sm: 4px;
+  --radius-md: 8px;
+  --radius-lg: 16px;
+  --radius-full: 9999px;
+
+  /* ==========================================================================
+     Effects
+     ========================================================================== */
+  /* Neon Glows */
+  --shadow-neon-blue: 0 0 10px rgba(41, 121, 255, 0.5), 0 0 20px rgba(41, 121, 255, 0.3);
+  --shadow-neon-green: 0 0 10px rgba(0, 230, 118, 0.5), 0 0 20px rgba(0, 230, 118, 0.3);
+  --shadow-neon-red: 0 0 10px rgba(255, 23, 68, 0.5), 0 0 20px rgba(255, 23, 68, 0.3);
+
+  /* Glassmorphism */
+  --glass-border: 1px solid rgba(255, 255, 255, 0.1);
+  --glass-backdrop: blur(12px);
+  
+  /* Transitions */
+  --transition-fast: 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-normal: 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  --transition-smooth: 0.5s cubic-bezier(0.4, 0, 0.2, 1);
+}

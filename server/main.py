@@ -59,6 +59,15 @@ except Exception as e:
 
 app = FastAPI(debug=True)
 
+# 注册新的路由
+from routers import market, analysis, stock, fund, derivatives, commodities
+app.include_router(market.router, prefix="/api/market", tags=["Market"])
+app.include_router(analysis.router, prefix="/api/analysis", tags=["Analysis"])
+app.include_router(stock.router, prefix="/api/stock", tags=["Stock"])
+app.include_router(fund.router, prefix="/api/fund", tags=["Fund"])
+app.include_router(derivatives.router, prefix="/api/derivatives", tags=["Derivatives"])
+app.include_router(commodities.router, prefix="/api/commodities", tags=["Commodities"])
+
 # 数据库依赖
 def get_db():
     db = SessionLocal()
@@ -872,6 +881,8 @@ async def generate_strategy(request: StrategyGenerationRequest):
 # 缓存品种列表
 CACHED_SYMBOLS = []
 LAST_CACHE_TIME = None
+SYMBOLS_REFRESHING = False
+SYMBOLS_NEXT_REFRESH = 0.0
 
 from core.data_loader import fetch_futures_data
 import math
@@ -882,9 +893,33 @@ def clean_nan(x):
         return None
     return x
 
+
+def refresh_symbols_cache():
+    global CACHED_SYMBOLS, LAST_CACHE_TIME, SYMBOLS_REFRESHING, SYMBOLS_NEXT_REFRESH
+    try:
+        import akshare as ak
+
+        df = ak.futures_display_main_sina()
+        futures_list = []
+        for _, row in df.iterrows():
+            symbol = row["symbol"]
+            name = row["name"]
+            multiplier = get_multiplier(symbol)
+            futures_list.append({"code": symbol, "name": f"{name} ({symbol})", "multiplier": multiplier})
+        if futures_list:
+            CACHED_SYMBOLS = futures_list
+            LAST_CACHE_TIME = datetime.datetime.now()
+            data_manager.save_symbols_list(futures_list)
+            SYMBOLS_NEXT_REFRESH = time.monotonic() + 60.0
+    except Exception as e:
+        print(f"后台刷新品种列表失败: {e}")
+        SYMBOLS_NEXT_REFRESH = time.monotonic() + 60.0
+    finally:
+        SYMBOLS_REFRESHING = False
+
 @app.get("/api/symbols")
-async def get_symbols():
-    global CACHED_SYMBOLS, LAST_CACHE_TIME
+async def get_symbols(background_tasks: BackgroundTasks):
+    global CACHED_SYMBOLS, LAST_CACHE_TIME, SYMBOLS_REFRESHING, SYMBOLS_NEXT_REFRESH
     
     # 1. 内存缓存 (1小时失效)
     if CACHED_SYMBOLS and LAST_CACHE_TIME:
@@ -900,46 +935,20 @@ async def get_symbols():
         return {"futures": CACHED_SYMBOLS}
         
     # 3. 网络获取 (如果本地没有)
-    try:
-        print("正在从 AkShare 获取最新期货品种列表...")
-        df = ak.futures_display_main_sina()
-        
-        futures_list = []
-        for _, row in df.iterrows():
-            symbol = row['symbol']
-            name = row['name']
-            
-            # 过滤掉非主力连续合约 (通常我们只关注主连)
-            # Sina 返回的通常都是主连 (如 V0, M0)
-            
-            multiplier = get_multiplier(symbol)
-            
-            futures_list.append({
-                "code": symbol,
-                "name": f"{name} ({symbol})",
-                "multiplier": multiplier
-            })
-            
-        CACHED_SYMBOLS = futures_list
-        LAST_CACHE_TIME = datetime.datetime.now()
-        
-        # 保存到本地
-        data_manager.save_symbols_list(futures_list)
-        
-        return {"futures": futures_list}
-        
-    except Exception as e:
-        print(f"获取品种列表失败: {e}")
-        # 如果失败，返回硬编码的列表作为降级方案
-        return {
-            "futures": [
-                {"code": "LH0", "name": "生猪主力 (LH0)", "multiplier": 16},
-                {"code": "SH0", "name": "烧碱主力 (SH0)", "multiplier": 30},
-                {"code": "RB0", "name": "螺纹钢主力 (RB0)", "multiplier": 10},
-                {"code": "M0", "name": "豆粕主力 (M0)", "multiplier": 10},
-                {"code": "IF0", "name": "沪深300 (IF0)", "multiplier": 300}
-            ]
-        }
+    now = time.monotonic()
+    if (not SYMBOLS_REFRESHING) and now >= SYMBOLS_NEXT_REFRESH:
+        SYMBOLS_REFRESHING = True
+        background_tasks.add_task(refresh_symbols_cache)
+
+    return {
+        "futures": [
+            {"code": "LH0", "name": "生猪主力 (LH0)", "multiplier": 16},
+            {"code": "SH0", "name": "烧碱主力 (SH0)", "multiplier": 30},
+            {"code": "RB0", "name": "螺纹钢主力 (RB0)", "multiplier": 10},
+            {"code": "M0", "name": "豆粕主力 (M0)", "multiplier": 10},
+            {"code": "IF0", "name": "沪深300 (IF0)", "multiplier": 300},
+        ]
+    }
 
 # --- Scheduler for Data Updates ---
 scheduler = BackgroundScheduler()
@@ -949,6 +958,8 @@ def daily_data_update():
     # Update cached symbols first to get latest list
     symbols = []
     try:
+        import akshare as ak
+
         df = ak.futures_display_main_sina()
         symbols = df['symbol'].tolist()
         

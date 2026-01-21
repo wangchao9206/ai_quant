@@ -1,0 +1,123 @@
+前端 mock / 写死数据清单（用于对接真实接口）
+
+1) StrategyAnalysis.jsx
+- 位置: d:\ai\AI量化\web\src\components\StrategyAnalysis.jsx#L21-L41
+- 写死内容:
+  - selectedSymbol 默认值 'SH0'
+  - overfittingScore = 0.15
+  - robustnessScore = 85
+  - marketCycleData = { bull: 25, bear: -5, sideways: 8 }
+  - attributionData = [Trend Following, Mean Reversion, Slippage/Fees, Alpha Selection]
+- 位置: #L170-L191
+- 写死内容:
+  - cycleOption 雷达图固定值 [25, 5, 8, 15, 20]
+- 位置: #L256-L269
+- 写死内容:
+  - AI 诊断 Alert message/description 文案
+  - 优化建议列表 3 条固定内容
+- 位置: #L233-L248
+- 写死内容:
+  - dataQuality 兜底值 92
+  - Tag 文案 “无缺失 / 复权准确”
+  - “Based on latest run” 文案
+
+2) StockDashboard.jsx
+- 位置: d:\ai\AI量化\web\src\components\StockDashboard.jsx#L229-L235
+- 写死内容:
+  - AI 异动提醒固定文案 “14:30 酿酒板块出现大额主力净流入 (+5.2亿)”
+
+3) DerivativesDashboard.jsx
+- 位置: d:\ai\AI量化\web\src\components\DerivativesDashboard.jsx#L141-L169
+- 写死内容:
+  - 统计卡片固定值: 基差 12.5, VIX 22.8
+  - 当前策略信号 “Gamma Scalping (Long Vol)”
+- 位置: #L95-L127
+- 写死内容:
+  - volSurfaceOption.series.data 3D 曲面固定数组
+- 位置: #L200-L219
+- 写死内容:
+  - 期权链标题 “IO2312 沪深300期权 T型报价”
+  - 3D Surface placeholder 文案
+
+4) CommoditiesDashboard.jsx
+- 位置: d:\ai\AI量化\web\src\components\CommoditiesDashboard.jsx#L116-L126
+- 写死内容:
+  - AI 交易机会提醒文案
+- 位置: #L134-L139
+- 写死内容:
+  - 时间维度按钮 1H/4H/1D（无接口绑定）
+- 位置: #L173-L182
+- 写死内容:
+  - 全球库存监控固定值（LME 铜库存、COMEX 黄金库存）
+
+5) SentimentRadar.jsx
+- 位置: d:\ai\AI量化\web\src\components\tools\SentimentRadar.jsx#L18-L21
+- 写死内容:
+  - sentimentData 默认值 { score: 50, trend: [], status: 'Neutral' }
+- 位置: #L99-L104
+- 写死内容:
+  - 情绪趋势 xAxis 固定 1H~8H
+- 位置: #L155-L157
+- 写死内容:
+  - “上升趋势”文案
+
+6) MacroCalendar.jsx
+- 位置: d:\ai\AI量化\web\src\components\tools\MacroCalendar.jsx#L28-L30
+- 说明:
+  - 注释标明后端当前返回 mock 数据（前端依赖该接口）
+- 位置: #L63-L65
+- 写死内容:
+  - 国家旗帜映射表
+- 位置: #L160-L166
+- 写死内容:
+  - 重要性筛选按钮（无接口绑定）
+- 位置: #L188-L195
+- 写死内容:
+  - AI 宏观分析师观点整段文案
+
+7) MarketReplay.jsx
+- 位置: d:\ai\AI量化\web\src\components\tools\MarketReplay.jsx#L24-L29
+- 写死内容:
+  - speed 默认 1
+  - account 初始资金 1,000,000
+  - tradeQty 默认 100
+- 位置: #L152-L156
+- 写死内容:
+  - 重置账户固定值
+
+8) RiskCenter.jsx
+- 位置: d:\ai\AI量化\web\src\components\tools\RiskCenter.jsx#L82-L106
+- 写死内容:
+  - VaR 折线图时间轴 T-30 至 T-1
+  - series.data 使用 Math.random() 生成
+- 位置: #L200-L203
+- 写死内容:
+  - 风控预警固定文案 2 条
+
+9) ConceptDashboard.jsx
+- 位置: d:\ai\AI量化\web\src\components\ConceptDashboard.jsx#L13-L56
+- 写死内容:
+  - 初始对话消息
+  - AI 回复逻辑 setTimeout 与固定文案
+- 位置: #L60-L95
+- 写死内容:
+  - 雷达图指标与两组固定数值
+- 位置: #L181-L199
+- 写死内容:
+  - 顶部行情指标（上证指数/VIX/净流入）固定值
+  - AI 算力/低延迟固定值
+- 位置: #L205-L252
+- 写死内容:
+  - 标的与日期区间、播放速度展示均为固定文案
+- 位置: #L263-L281
+- 写死内容:
+  - Strategy DNA Map 固定规则与 Gene 值
+- 位置: #L303-L339
+- 写死内容:
+  - 诊断指标固定百分比与 AI Insight 文案
+- 位置: #L344-L353
+- 写死内容:
+  - Total Return / Max Drawdown 固定值
+
+补充说明
+- 其他页面（BacktestDashboard, FundDashboard, HistoryPanel, ResultView, StrategyEditor, StockDashboard 主要数据）已走后端接口或来自父级 props，不属于 mock 数据。

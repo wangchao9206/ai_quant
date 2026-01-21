@@ -1,163 +1,123 @@
-:root {
-  --primary-color: #1890ff;
-  --bg-color: #000000;
-  --bg-secondary: #141414;
-  --border-color: #303030;
-  --text-primary: #e6e6e6;
-  --text-secondary: #a0a0a0;
-}
+@import './styles/design-tokens.css';
 
+/* ==========================================================================
+   Global Reset & Base Styles
+   ========================================================================== */
 body {
-  margin: 0;
-  padding: 0;
-  background-color: var(--bg-color);
-  color: var(--text-primary);
-  font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, 'Noto Sans', sans-serif, 'Apple Color Emoji', 'Segoe UI Emoji', 'Segoe UI Symbol', 'Noto Color Emoji';
+  background-color: var(--color-bg-base);
+  color: var(--color-text-primary);
+  font-family: var(--font-sans);
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
 }
 
-#root {
-  height: 100vh;
-  width: 100vw;
-  max-width: none;
-  margin: 0;
-  padding: 0;
-  text-align: left;
-}
-
-/* Scrollbar Styling */
+/* Custom Scrollbar for "Cyberpunk" feel */
 ::-webkit-scrollbar {
   width: 8px;
   height: 8px;
 }
 
 ::-webkit-scrollbar-track {
-  background: var(--bg-color);
+  background: var(--color-bg-base);
 }
 
 ::-webkit-scrollbar-thumb {
   background: #333;
-  border-radius: 4px;
+  border-radius: var(--radius-full);
 }
 
 ::-webkit-scrollbar-thumb:hover {
   background: #555;
 }
 
-/* Pro Card Styling */
-.pro-card {
-  background: var(--bg-secondary) !important;
-  border: 1px solid var(--border-color) !important;
-  border-radius: 2px !important;
+/* ==========================================================================
+   Utility Classes
+   ========================================================================== */
+
+/* Glassmorphism Container */
+.glass-panel, .glass-card {
+  background: var(--color-bg-surface-glass);
+  backdrop-filter: var(--glass-backdrop);
+  -webkit-backdrop-filter: var(--glass-backdrop);
+  border: var(--glass-border);
+  box-shadow: 0 4px 30px rgba(0, 0, 0, 0.1);
+  border-radius: var(--radius-lg);
 }
 
-.pro-card .ant-card-head {
-  border-bottom: 1px solid var(--border-color) !important;
-  min-height: 48px;
-  padding: 0 16px;
+/* Text Gradients */
+.text-gradient-primary {
+  background: linear-gradient(135deg, var(--color-primary), var(--color-info));
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
-.pro-card .ant-card-head-title {
-  color: var(--text-primary);
-  font-weight: 600;
-  font-size: 14px;
-  text-transform: uppercase;
-  letter-spacing: 0.5px;
+.text-gradient-success {
+  background: linear-gradient(135deg, var(--color-secondary), #69F0AE);
+  -webkit-background-clip: text;
+  -webkit-text-fill-color: transparent;
 }
 
-.pro-card .ant-card-body {
-  padding: 16px;
+/* Neon Text */
+.text-neon-blue {
+  color: var(--color-primary);
+  text-shadow: 0 0 10px rgba(41, 121, 255, 0.5);
 }
 
-/* Ant Design Overrides for Dark Mode Pro Feel */
-.ant-layout-header {
-  background: #000 !important;
-  border-bottom: 1px solid var(--border-color);
-  padding: 0 24px !important;
-  height: 48px !important;
-  line-height: 48px !important;
+.text-neon-green {
+  color: var(--color-secondary);
+  text-shadow: 0 0 10px rgba(0, 230, 118, 0.5);
 }
 
-.ant-layout-sider {
-  background: #000 !important;
-  border-right: 1px solid var(--border-color);
+/* Animations */
+@keyframes pulse-glow {
+  0% { box-shadow: 0 0 0 0 rgba(41, 121, 255, 0.4); }
+  70% { box-shadow: 0 0 0 10px rgba(41, 121, 255, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(41, 121, 255, 0); }
+}
+
+.animate-pulse-glow {
+  animation: pulse-glow 2s infinite;
+}
+
+@keyframes float {
+  0% { transform: translateY(0px); }
+  50% { transform: translateY(-10px); }
+  100% { transform: translateY(0px); }
+}
+
+.animate-float {
+  animation: float 6s ease-in-out infinite;
+}
+
+/* Grid Layout Helpers */
+.grid-cockpit {
+  display: grid;
+  grid-template-columns: 300px 1fr 350px;
+  grid-template-rows: auto 1fr auto;
+  gap: var(--space-md);
+  height: calc(100vh - 64px); /* Subtract header height */
+  padding: var(--space-md);
+  overflow: hidden;
+}
+
+/* Ant Design Overrides for Dark Theme */
+.ant-card {
+  background: transparent !important;
+}
+
+.ant-card-bordered {
+  border: var(--glass-border) !important;
 }
 
 .ant-menu-dark {
-  background: #000 !important;
+  background: var(--color-bg-base) !important;
 }
 
-.ant-tabs-nav {
-  margin-bottom: 0 !important;
+.ant-layout-sider {
+  background: var(--color-bg-base) !important;
 }
 
-.ant-tabs-tab {
-  padding: 8px 16px !important;
-  color: var(--text-secondary) !important;
-}
-
-.ant-tabs-tab-active .ant-tabs-tab-btn {
-  color: var(--primary-color) !important;
-  font-weight: 500;
-}
-
-/* Form Styles */
-.ant-form-item-label > label {
-  color: var(--text-secondary) !important;
-  font-size: 12px;
-}
-
-.ant-input, .ant-input-number, .ant-select-selector {
-  background-color: #1f1f1f !important;
-  border-color: #434343 !important;
-  color: #e6e6e6 !important;
-  border-radius: 2px !important;
-}
-
-.ant-btn {
-  border-radius: 2px !important;
-  font-weight: 500;
-}
-
-.ant-table {
-  background: transparent !important;
-  font-family: 'JetBrains Mono', monospace;
-}
-
-.ant-table-thead > tr > th {
-  background: #1f1f1f !important;
-  color: var(--text-secondary) !important;
-  border-bottom: 1px solid var(--border-color) !important;
-  font-weight: 600;
-  font-size: 12px;
-}
-
-.ant-table-tbody > tr > td {
-  border-bottom: 1px solid var(--border-color) !important;
-  color: var(--text-primary);
-}
-
-.ant-table-tbody > tr:hover > td {
-  background: #1f1f1f !important;
-}
-
-.ant-modal-content, .ant-modal-header {
-  background-color: var(--bg-secondary) !important;
-  border: 1px solid var(--border-color);
-}
-
-.ant-modal-title {
-  color: var(--text-primary) !important;
-}
-
-.ant-drawer-content {
-  background-color: var(--bg-secondary) !important;
-}
-
-.ant-drawer-header {
-  background-color: var(--bg-secondary) !important;
-  border-bottom: 1px solid var(--border-color) !important;
-}
-
-.ant-drawer-title {
-  color: var(--text-primary) !important;
+.ant-layout-header {
+  background: var(--color-bg-base) !important;
+  border-bottom: 1px solid #333;
 }
