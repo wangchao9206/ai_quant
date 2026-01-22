@@ -3,11 +3,11 @@ import pandas as pd
 import datetime
 import importlib
 import traceback
-from .data_loader import fetch_futures_data
+from .data_loader import fetch_futures_data, fetch_stock_data, infer_asset_type
 from . import strategy
 
 class BacktestEngine:
-    def run(self, symbol, period, strategy_params, start_date=None, end_date=None, initial_cash=1000000.0, strategy_class=None):
+    def run(self, symbol, period, strategy_params, start_date=None, end_date=None, initial_cash=1000000.0, strategy_class=None, asset_type=None):
         StrategyClass = None
 
         if strategy_class:
@@ -29,7 +29,11 @@ class BacktestEngine:
 
         # 2. 获取数据
         print(f"Running backtest for {symbol}...")
-        df = fetch_futures_data(symbol, period, start_date, end_date)
+        resolved_asset_type = asset_type or infer_asset_type(symbol)
+        if resolved_asset_type == "stock":
+            df = fetch_stock_data(symbol, period, start_date, end_date)
+        else:
+            df = fetch_futures_data(symbol, period, start_date, end_date)
         
         if df is None or df.empty:
             return {"error": "No data found for the given symbol and date range"}
@@ -69,12 +73,14 @@ class BacktestEngine:
         
         # 3. 添加策略
         # 确保 contract_multiplier 是 int
-        if 'contract_multiplier' in strategy_params:
+        if resolved_asset_type == "futures" and 'contract_multiplier' in strategy_params:
             strategy_params['contract_multiplier'] = int(strategy_params['contract_multiplier'])
             
         # Filter params for StrategyClass to avoid "unexpected keyword argument" errors
         # especially for GeneratedStrategy which may not have all standard params defined
         strategy_kwargs = {}
+        local_params = dict(strategy_params)
+        local_params["asset_type"] = resolved_asset_type
         if hasattr(StrategyClass, 'params'):
             valid_params = set()
             # Inspect valid parameters from the Strategy class (Backtrader params mechanism)
@@ -84,11 +90,11 @@ class BacktestEngine:
                     valid_params.add(name)
             
             print(f"Valid strategy params: {valid_params}")
-            for k, v in strategy_params.items():
+            for k, v in local_params.items():
                 if k in valid_params:
                     strategy_kwargs[k] = v
         else:
-            strategy_kwargs = strategy_params.copy()
+            strategy_kwargs = local_params.copy()
 
         cerebro.addstrategy(StrategyClass, **strategy_kwargs)
         
@@ -100,9 +106,16 @@ class BacktestEngine:
         # 为了演示，设置一个通用费率
         # 注意：margin参数是每手保证金，如果是股票应该设为None或0，如果是期货则为具体数值
         # 这里为了防止小资金无法开仓，暂时将 margin 设为 None (按全额现金交易) 或一个较小的值
-        cerebro.broker.setcommission(commission=0.0001, mult=strategy_params.get('contract_multiplier', 1))
+        if resolved_asset_type == "stock":
+            cerebro.broker.setcommission(commission=0.001)
+        else:
+            cerebro.broker.setcommission(commission=0.0001, mult=strategy_params.get('contract_multiplier', 1))
         
         # 5. 添加分析器
+        if resolved_asset_type == "stock":
+            # For stocks, use PercentSizer to invest 95% of cash
+            cerebro.addsizer(bt.sizers.PercentSizer, percents=95)
+        
         cerebro.addanalyzer(bt.analyzers.TimeReturn, _name='timereturn')
         cerebro.addanalyzer(bt.analyzers.SharpeRatio, _name='sharpe', timeframe=bt.TimeFrame.Days, compression=1, riskfreerate=0.0)
         cerebro.addanalyzer(bt.analyzers.DrawDown, _name='drawdown')

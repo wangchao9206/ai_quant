@@ -5,12 +5,22 @@ def generate_strategy_summary(record):
     """
     summary = []
     
-    # Safe access helpers
-    return_rate = record.return_rate if record.return_rate is not None else 0.0
-    sharpe_ratio = record.sharpe_ratio if record.sharpe_ratio is not None else 0.0
-    max_drawdown = record.max_drawdown if record.max_drawdown is not None else 0.0
-    win_rate = record.win_rate if record.win_rate is not None else 0.0
-    total_trades = record.total_trades if record.total_trades is not None else 0
+    def _get(name, default=None):
+        if isinstance(record, dict):
+            return record.get(name, default)
+        return getattr(record, name, default)
+
+    return_rate = _get("return_rate")
+    sharpe_ratio = _get("sharpe_ratio")
+    max_drawdown = _get("max_drawdown")
+    win_rate = _get("win_rate")
+    total_trades = _get("total_trades")
+
+    return_rate = return_rate if return_rate is not None else 0.0
+    sharpe_ratio = sharpe_ratio if sharpe_ratio is not None else 0.0
+    max_drawdown = max_drawdown if max_drawdown is not None else 0.0
+    win_rate = win_rate if win_rate is not None else 0.0
+    total_trades = total_trades if total_trades is not None else 0
     won_trades = int(total_trades * (win_rate / 100))
 
     # 1. Performance Overview

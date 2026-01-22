@@ -25,8 +25,7 @@ const MacroCalendar = () => {
             try {
                 const countriesStr = selectedCountries.join(',');
                 const dateStr = selectedDate.format('YYYY-MM-DD');
-                // Note: Backend currently mocks data regardless of date, but accepts it.
-                // It also accepts comma separated countries.
+                // Backend fetches real data via AkShare/TDX
                 const response = await axios.get(`${API_BASE_URL}/api/market/macro/calendar`, {
                     params: {
                         date: dateStr,
@@ -95,7 +94,7 @@ const MacroCalendar = () => {
             key: 'actual',
             width: 100,
             render: (text, record) => {
-                // Simple logic to colorize based on comparison (mock)
+                // Logic to colorize based on comparison
                 const isBetter = parseFloat(text) > parseFloat(record.forecast);
                 const color = isBetter ? 'var(--color-secondary)' : '#ff4d4f';
                 return <span style={{ fontWeight: 'bold', color: color, fontFamily: 'JetBrains Mono' }}>{text}</span>;

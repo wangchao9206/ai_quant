@@ -10,7 +10,7 @@ def _run_backtest_wrapper(args):
     Wrapper function for parallel execution.
     Must be top-level for pickling.
     """
-    symbol, period, params, start_date, end_date, initial_cash = args
+    symbol, period, params, start_date, end_date, initial_cash, asset_type = args
     engine = BacktestEngine()
     result = engine.run(
         symbol=symbol,
@@ -18,7 +18,8 @@ def _run_backtest_wrapper(args):
         strategy_params=params,
         start_date=start_date,
         end_date=end_date,
-        initial_cash=initial_cash
+        initial_cash=initial_cash,
+        asset_type=asset_type
     )
     
     if "error" in result:
@@ -38,7 +39,7 @@ class StrategyOptimizer:
         # We don't instantiate engine here for parallel runs
         pass
         
-    def optimize(self, symbol, period, initial_params, target_return=20.0, max_trials=20, start_date=None, end_date=None, initial_cash=1000000.0, parallel=True):
+    def optimize(self, symbol, period, initial_params, target_return=20.0, max_trials=20, start_date=None, end_date=None, initial_cash=1000000.0, parallel=True, asset_type=None):
         """
         Parallelized Strategy Optimization
         """
@@ -73,7 +74,7 @@ class StrategyOptimizer:
                 if trial_params['fast_period'] >= trial_params['slow_period']:
                     trial_params['slow_period'] = trial_params['fast_period'] + 5
             
-            trials.append((symbol, period, trial_params, start_date, end_date, initial_cash))
+            trials.append((symbol, period, trial_params, start_date, end_date, initial_cash, asset_type))
             
         if parallel:
             # Use ProcessPoolExecutor for parallel execution
@@ -107,7 +108,7 @@ class StrategyOptimizer:
                 # Unpack args
                 _, _, params, _, _, _ = args
                 print(f"Trial #{i+1}: {params}")
-                result = engine.run(symbol, period, params, start_date, end_date, initial_cash)
+                result = engine.run(symbol, period, params, start_date, end_date, initial_cash, asset_type=asset_type)
                 
                 if "error" in result: continue
                 
@@ -127,4 +128,3 @@ class StrategyOptimizer:
                     break
                     
         return best_params, best_result
-

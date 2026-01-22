@@ -6,3 +6,6 @@ backtrader
 pandas
 matplotlib
 akshare
+pymongo
+mongita
+pytdx

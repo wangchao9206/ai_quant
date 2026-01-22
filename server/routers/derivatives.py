@@ -2,7 +2,6 @@ from fastapi import APIRouter
 from typing import List
 from pydantic import BaseModel
 import asyncio
-import random
 import math
 import threading
 import time
@@ -78,7 +77,9 @@ async def get_futures():
 
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else _mock_futures()
+    if cached is not None:
+        return cached
+    return []
 
 @router.get("/options", response_model=List[OptionItem])
 async def get_options():
@@ -115,7 +116,9 @@ async def get_options():
 
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else _mock_options()
+    if cached is not None:
+        return cached
+    return []
 
 @router.get("/summary")
 async def get_derivatives_summary():
@@ -152,30 +155,7 @@ async def get_derivatives_summary():
 
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else _mock_summary()
-
-
-def _mock_futures():
-    items = [
-        {"symbol": "IF2312", "name": "沪深300主力", "base_price": 3520},
-        {"symbol": "IC2312", "name": "中证500主力", "base_price": 5430},
-        {"symbol": "IM2312", "name": "中证1000主力", "base_price": 6100},
-        {"symbol": "RB2401", "name": "螺纹钢2401", "base_price": 3850},
-    ]
-    result = []
-    for i, item in enumerate(items):
-        price = item["base_price"] + random.uniform(-50, 50)
-        result.append({
-            "key": str(i + 1),
-            "symbol": item["symbol"],
-            "name": item["name"],
-            "price": round(price, 1),
-            "change": round(random.uniform(-2, 2), 1),
-            "volume": f"{random.randint(5, 150)}W",
-            "openInt": f"{random.randint(1, 200)}W",
-            "basis": round(random.uniform(-20, 20), 1),
-        })
-    return result
+    return cached if cached is not None else {"basis": 0.0, "vix": 0.0, "signal": "Neutral"}
 
 
 def _fetch_futures_akshare():
@@ -185,43 +165,47 @@ def _fetch_futures_akshare():
     if df is None or df.empty:
         return []
     records = df.to_dict(orient="records")
-    result = []
-    for i, r in enumerate(records[:20]):
+
+    rows = []
+    for r in records:
         symbol = r.get("合约") or r.get("symbol") or r.get("合约代码") or ""
+        symbol = str(symbol).strip()
+        if not symbol:
+            continue
+
         name = r.get("品种") or r.get("name") or r.get("品种名称") or ""
         price = r.get("最新价") or r.get("最新") or r.get("price") or 0
         change = r.get("涨跌幅") or r.get("涨跌") or r.get("change") or 0
         volume = r.get("成交量") or r.get("volume") or ""
         open_int = r.get("持仓量") or r.get("open_interest") or ""
         basis = r.get("基差") or r.get("basis") or 0
+
         price_f = _to_float(price)
         change_f = _to_float(change)
         basis_f = _to_float(basis)
-        result.append({
-            "key": str(i + 1),
-            "symbol": str(symbol),
+        vol_score = _to_float(volume) or 0.0
+
+        rows.append({
+            "symbol": symbol,
             "name": str(name),
             "price": round(price_f, 1) if price_f is not None else 0,
             "change": round(change_f, 1) if change_f is not None else 0,
             "volume": str(volume),
             "openInt": str(open_int),
             "basis": round(basis_f, 1) if basis_f is not None else 0,
+            "_vol": vol_score,
         })
-    return result
 
+    # Sort by symbol for stability
+    rows.sort(key=lambda x: x["symbol"])
 
-def _mock_options():
-    strikes = [3500, 3550, 3600, 3650]
     result = []
-    for i, k in enumerate(strikes):
-        result.append({
-            "key": str(i + 1),
-            "strike": k,
-            "callPrice": round(random.uniform(10, 200), 1),
-            "callVol": random.randint(1000, 10000),
-            "putPrice": round(random.uniform(10, 200), 1),
-            "putVol": random.randint(1000, 10000),
-        })
+    # Return all (or up to 100) to ensure stability. 
+    # Users prefer a stable list.
+    for i, r in enumerate(rows):
+        r.pop("_vol", None)
+        r["key"] = str(i + 1)
+        result.append(r)
     return result
 
 
@@ -233,46 +217,58 @@ def _fetch_options_akshare():
         return []
 
     records = df.to_dict(orient="records")
-    result = []
-    for r in records[:20]:
+    by_strike = {}
+    for r in records:
         strike = r.get("行权价") or r.get("strike") or r.get("行权价(元)") or 0
-        option_type = r.get("期权类型") or r.get("type") or ""
+        strike_f = _to_float(strike)
+        if strike_f is None:
+            continue
+        strike_i = int(strike_f)
+
+        option_type = str(r.get("期权类型") or r.get("type") or "").upper()
         price = r.get("最新价") or r.get("price") or 0
         vol = r.get("成交量") or r.get("volume") or 0
-        strike_i = int(float(strike)) if _to_float(strike) is not None else 0
-        price_f = _to_float(price)
+
+        price_f = _to_float(price) or 0.0
         vol_i = int(_to_float(vol) or 0)
+
+        row = by_strike.get(strike_i)
+        if row is None:
+            row = {"strike": strike_i, "callPrice": 0.0, "callVol": 0, "putPrice": 0.0, "putVol": 0, "_score": 0}
+            by_strike[strike_i] = row
+
         if option_type in ["认购", "CALL", "C"]:
-            result.append({
-                "key": str(len(result) + 1),
-                "strike": strike_i,
-                "callPrice": round(price_f, 1) if price_f is not None else 0,
-                "callVol": vol_i,
-                "putPrice": 0,
-                "putVol": 0,
-            })
+            row["callPrice"] = round(price_f, 1)
+            row["callVol"] = vol_i
         elif option_type in ["认沽", "PUT", "P"]:
-            result.append({
-                "key": str(len(result) + 1),
-                "strike": strike_i,
-                "callPrice": 0,
-                "callVol": 0,
-                "putPrice": round(price_f, 1) if price_f is not None else 0,
-                "putVol": vol_i,
-            })
-    return result[:12]
+            row["putPrice"] = round(price_f, 1)
+            row["putVol"] = vol_i
 
+        row["_score"] = row.get("callVol", 0) + row.get("putVol", 0)
 
-def _mock_summary():
-    return {
-        "basis": round(random.uniform(-5, 20), 2),
-        "vix": round(random.uniform(15, 35), 1),
-        "signal": "Gamma Scalping (Long Vol)",
-    }
+    rows = list(by_strike.values())
+    
+    # Sort by strike to ensure stability
+    # Users prefer a stable list over a jumping "hot" list
+    rows.sort(key=lambda x: x.get("strike", 0))
+
+    result = []
+    # Return all options (or a large enough subset if too many)
+    # Typically there are 20-50 strikes, which is manageable.
+    for i, r in enumerate(rows):
+        r.pop("_score", None)
+        r["key"] = str(i + 1)
+        result.append(r)
+        
+    return result
 
 
 def _fetch_summary_akshare():
-    result = _mock_summary()
+    result = {
+        "basis": 0.0,
+        "vix": 0.0,
+        "signal": "Neutral",
+    }
     try:
         import akshare as ak
 

@@ -110,62 +110,74 @@ async def get_kline_data(
 async def get_symbols(data_manager: DataManager = Depends(get_data_manager)):
     global CACHED_SYMBOLS, LAST_CACHE_TIME
     
+    futures_list = []
+    
     # 1. 内存缓存 (1小时失效)
     if CACHED_SYMBOLS and LAST_CACHE_TIME:
         if (datetime.datetime.now() - LAST_CACHE_TIME).total_seconds() < 3600:
-            return {"futures": CACHED_SYMBOLS}
-            
-    # 2. 本地文件缓存 (持久化)
-    local_symbols = data_manager.get_symbols_list()
-    if local_symbols:
-        print("从本地缓存加载品种列表")
-        CACHED_SYMBOLS = local_symbols
-        LAST_CACHE_TIME = datetime.datetime.now()
-        return {"futures": CACHED_SYMBOLS}
-        
-    # 3. 网络获取 (如果本地没有) - Fallback to direct fetch logic or trigger update
-    # Here we duplicate logic slightly or use a helper, but to be safe/fast we try to use tasks logic
-    # But since this is a GET request, we might want to wait or just return defaults.
-    # Ideally, we call daily_data_update() but that's slow.
+            futures_list = CACHED_SYMBOLS
     
-    # Let's try to fetch just the list using akshare directly (lazy import)
-    try:
-        print("正在从 AkShare 获取最新期货品种列表...")
-        import akshare as ak
-        df = ak.futures_display_main_sina()
-        
-        futures_list = []
-        for _, row in df.iterrows():
-            symbol = row['symbol']
-            name = row['name']
-            multiplier = get_multiplier(symbol)
+    # 2. 本地文件缓存 (持久化)
+    if not futures_list:
+        local_symbols = data_manager.get_symbols_list()
+        if local_symbols:
+            print("从本地缓存加载品种列表")
+            futures_list = local_symbols
+            CACHED_SYMBOLS = futures_list
+            LAST_CACHE_TIME = datetime.datetime.now()
             
-            futures_list.append({
-                "code": symbol,
-                "name": f"{name} ({symbol})",
-                "multiplier": multiplier
-            })
+    # 3. 网络获取 (如果本地没有)
+    if not futures_list:
+        try:
+            print("正在从 AkShare 获取最新期货品种列表...")
+            import akshare as ak
+            df = ak.futures_display_main_sina()
             
-        CACHED_SYMBOLS = futures_list
-        LAST_CACHE_TIME = datetime.datetime.now()
-        
-        # 保存到本地
-        data_manager.save_symbols_list(futures_list)
-        
-        return {"futures": futures_list}
-        
-    except Exception as e:
-        print(f"获取品种列表失败: {e}")
-        # 如果失败，返回硬编码的列表作为降级方案
-        return {
-            "futures": [
+            for _, row in df.iterrows():
+                symbol = row['symbol']
+                name = row['name']
+                multiplier = get_multiplier(symbol)
+                
+                futures_list.append({
+                    "code": symbol,
+                    "name": f"{name} ({symbol})",
+                    "multiplier": multiplier
+                })
+                
+            CACHED_SYMBOLS = futures_list
+            LAST_CACHE_TIME = datetime.datetime.now()
+            
+            # 保存到本地
+            data_manager.save_symbols_list(futures_list)
+            
+        except Exception as e:
+            print(f"获取品种列表失败: {e}")
+            # 如果失败，返回硬编码的列表作为降级方案
+            futures_list = [
                 {"code": "LH0", "name": "生猪主力 (LH0)", "multiplier": 16},
                 {"code": "SH0", "name": "烧碱主力 (SH0)", "multiplier": 30},
                 {"code": "RB0", "name": "螺纹钢主力 (RB0)", "multiplier": 10},
                 {"code": "M0", "name": "豆粕主力 (M0)", "multiplier": 10},
                 {"code": "IF0", "name": "沪深300 (IF0)", "multiplier": 300}
             ]
-        }
+
+    # 4. Common Stocks / Indices
+    # Provide common indices and stocks for backtest
+    common_stocks = [
+        {"code": "sh000001", "name": "上证指数 (000001)", "multiplier": 1},
+        {"code": "sz399001", "name": "深证成指 (399001)", "multiplier": 1},
+        {"code": "sh000300", "name": "沪深300 (000300)", "multiplier": 1},
+        {"code": "sh000016", "name": "上证50 (000016)", "multiplier": 1},
+        {"code": "sz399006", "name": "创业板指 (399006)", "multiplier": 1},
+        {"code": "sh600519", "name": "贵州茅台 (600519)", "multiplier": 100},
+        {"code": "sz300750", "name": "宁德时代 (300750)", "multiplier": 100},
+        {"code": "sz002594", "name": "比亚迪 (002594)", "multiplier": 100},
+    ]
+
+    return {
+        "futures": futures_list,
+        "stocks": common_stocks
+    }
 
 @router.post("/update")
 async def trigger_data_update(

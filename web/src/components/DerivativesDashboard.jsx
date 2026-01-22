@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Row, Col, Card, Statistic, Table, Tag, Tabs, Button, Space, Typography, message } from 'antd';
 import { 
     ThunderboltOutlined, 
@@ -22,12 +22,26 @@ const DerivativesDashboard = () => {
     const [loading, setLoading] = useState(false);
     const [summary, setSummary] = useState({ basis: 0, vix: 0, signal: '-' });
 
+    const refreshLockRef = useRef(false);
+
     useEffect(() => {
         fetchData();
+
+        const intervalId = window.setInterval(async () => {
+            if (refreshLockRef.current) return;
+            refreshLockRef.current = true;
+            try {
+                await fetchData({ silent: true });
+            } finally {
+                refreshLockRef.current = false;
+            }
+        }, 5000);
+
+        return () => window.clearInterval(intervalId);
     }, []);
 
-    const fetchData = async () => {
-        setLoading(true);
+    const fetchData = async ({ silent = false } = {}) => {
+        if (!silent) setLoading(true);
         try {
             const [futuresRes, optionsRes, summaryRes] = await Promise.all([
                 axios.get(`${API_BASE_URL}/api/derivatives/futures`),
@@ -38,10 +52,12 @@ const DerivativesDashboard = () => {
             setOptionsData(optionsRes.data);
             setSummary(summaryRes.data);
         } catch (error) {
-            console.error("Failed to fetch derivatives data:", error);
-            message.error("获取衍生品数据失败");
+            if (!silent) {
+                console.error("Failed to fetch derivatives data:", error);
+                message.error("获取衍生品数据失败");
+            }
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
     const futuresColumns = [
@@ -137,6 +153,27 @@ const DerivativesDashboard = () => {
                     衍生品交易台 (Derivatives Desk)
                 </Title>
                 <Text style={{ color: 'rgba(255,255,255,0.45)' }}>高频期货交易 • 期权波动率策略 • 风险对冲中心</Text>
+            </div>
+
+            <style>{`
+                @keyframes aiqMarqueeDerivatives {
+                    0% { transform: translateX(0); }
+                    100% { transform: translateX(-50%); }
+                }
+            `}</style>
+
+            <div className="glass-panel" style={{ marginBottom: '16px', padding: '10px 12px', overflow: 'hidden' }}>
+                <div style={{ display: 'flex', width: '200%', animation: 'aiqMarqueeDerivatives 18s linear infinite' }}>
+                    {[0, 1].map((dup) => (
+                        <div key={dup} style={{ display: 'inline-flex', alignItems: 'center', gap: '18px', width: '50%', whiteSpace: 'nowrap' }}>
+                            {futuresData.slice(0, 12).map((f) => (
+                                <span key={`f-${dup}-${f.symbol}`} style={{ color: Number(f.change) >= 0 ? 'var(--color-secondary)' : '#ff4d4f', fontFamily: 'JetBrains Mono' }}>
+                                    {f.symbol} {Number(f.price).toFixed(1)} {(Number(f.change) > 0 ? '+' : '') + Number(f.change).toFixed(1)}%
+                                </span>
+                            ))}
+                        </div>
+                    ))}
+                </div>
             </div>
 
             <Row gutter={24} style={{ marginBottom: '24px' }}>

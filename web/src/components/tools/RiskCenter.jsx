@@ -86,18 +86,19 @@ const RiskCenter = () => {
         xAxis: { 
             type: 'category', 
             boundaryGap: false, 
-            data: Array.from({length: 30}, (_, i) => `T-${30-i}`),
+            data: portfolioRisk.dates && portfolioRisk.dates.length > 0 ? portfolioRisk.dates : Array.from({length: 30}, (_, i) => `T-${30-i}`),
             axisLine: { lineStyle: { color: '#666' } }
         },
         yAxis: { 
             type: 'value',
-            splitLine: { lineStyle: { color: '#333' } }
+            splitLine: { lineStyle: { color: '#333' } },
+            scale: true
         },
         series: [{
             name: 'Portfolio Value',
             type: 'line',
             smooth: true,
-            data: Array.from({length: 30}, () => 1000000 + (Math.random()-0.5)*50000),
+            data: portfolioRisk.curve && portfolioRisk.curve.length > 0 ? portfolioRisk.curve : [],
             markArea: {
                 itemStyle: { color: 'rgba(255, 77, 79, 0.1)' },
                 data: [[{ xAxis: 'T-5' }, { xAxis: 'T-1' }]]

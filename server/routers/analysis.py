@@ -3,7 +3,6 @@ from fastapi import APIRouter
 from typing import List, Dict, Any
 from pydantic import BaseModel
 import asyncio
-import random
 import threading
 import time
 
@@ -81,6 +80,8 @@ class RiskMetrics(BaseModel):
     beta: float
     sharpe: float
     maxDrawdown: float
+    curve: List[float] = []
+    dates: List[str] = []
 
 class StressTest(BaseModel):
     scenario: str
@@ -91,23 +92,6 @@ class StressTest(BaseModel):
 
 @router.get("/sentiment/overview")
 async def get_sentiment_overview():
-    def _mock():
-        score = random.randint(30, 90)
-        status = "恐惧"
-        if score > 80:
-            status = "极度贪婪"
-        elif score > 50:
-            status = "贪婪"
-        elif score < 20:
-            status = "极度恐惧"
-        trend = []
-        curr = score
-        for _ in range(8):
-            curr += random.randint(-5, 5)
-            curr = max(0, min(100, curr))
-            trend.insert(0, curr)
-        return {"score": score, "trend": trend, "status": status}
-
     def _fetch():
         try:
             import akshare as ak
@@ -136,7 +120,7 @@ async def get_sentiment_overview():
             except Exception:
                 trend = []
             if not trend:
-                trend = [max(0, min(100, score + random.randint(-5, 5))) for _ in range(8)]
+                trend = []
             status = "恐惧"
             if score > 80:
                 status = "极度贪婪"
@@ -148,38 +132,21 @@ async def get_sentiment_overview():
         except Exception:
             return None
 
-    return await _get_or_refresh(
+    cached = await _get_or_refresh(
         _sentiment_overview_cache,
         ttl_s=10.0,
         timeout_s=6.0,
         fail_delay_s=15.0,
         fetch_fn=_fetch,
-        fallback_fn=_mock,
+        fallback_fn=lambda: None,
     )
+    if cached:
+        return cached
+    # Return a safe default structure if data is missing, rather than 404 or None which might break frontend
+    return {"score": 50, "trend": [], "status": "Neutral"}
 
 @router.get("/sentiment/topics", response_model=List[HotTopic])
 async def get_hot_topics():
-    def _mock():
-        topics = [
-            {"text": "人工智能", "base_weight": 10, "sentiment": "bullish"},
-            {"text": "半导体", "base_weight": 8, "sentiment": "bullish"},
-            {"text": "美联储降息", "base_weight": 9, "sentiment": "neutral"},
-            {"text": "房地产", "base_weight": 6, "sentiment": "bearish"},
-            {"text": "新能源车", "base_weight": 7, "sentiment": "bullish"},
-            {"text": "消费电子", "base_weight": 5, "sentiment": "neutral"},
-            {"text": "中特估", "base_weight": 8, "sentiment": "bullish"},
-            {"text": "低空经济", "base_weight": 9, "sentiment": "bullish"},
-            {"text": "量化私募", "base_weight": 6, "sentiment": "bearish"},
-        ]
-        result = []
-        for t in topics:
-            result.append({
-                "text": t["text"],
-                "weight": t["base_weight"] + random.randint(-2, 2),
-                "sentiment": t["sentiment"],
-            })
-        return result
-
     def _fetch():
         try:
             import akshare as ak
@@ -209,45 +176,18 @@ async def get_hot_topics():
         except Exception:
             return None
 
-    return await _get_or_refresh(
+    cached = await _get_or_refresh(
         _hot_topics_cache,
         ttl_s=30.0,
         timeout_s=6.0,
         fail_delay_s=30.0,
         fetch_fn=_fetch,
-        fallback_fn=_mock,
+        fallback_fn=lambda: [],
     )
+    return cached or []
 
 @router.get("/sentiment/news", response_model=List[NewsItem])
 async def get_news_stream():
-    def _mock():
-        news_pool = [
-            {
-                "title": "某大型科技公司发布新一代AI芯片，算力提升30%",
-                "source": "路透社",
-                "sentiment": "bullish",
-                "analysis": "AI算力需求持续旺盛，利好上游硬件板块。",
-            },
-            {"title": "央行开展5000亿元MLF操作，利率维持不变", "source": "财联社", "sentiment": "neutral", "analysis": "流动性保持合理充裕，符合市场预期。"},
-            {"title": "某头部房企债务重组方案获批", "source": "彭博", "sentiment": "bullish", "analysis": "地产板块风险偏好修复，利好金融地产链。"},
-            {"title": "原油价格大幅下挫，跌破70美元关口", "source": "华尔街见闻", "sentiment": "bearish", "analysis": "利空能源板块，利好航空航运等下游行业。"},
-            {"title": "北向资金今日大幅净流入超百亿", "source": "证券时报", "sentiment": "bullish", "analysis": "外资信心回暖，核心资产有望估值修复。"},
-        ]
-        result = []
-        for i, news in enumerate(news_pool):
-            result.append(
-                {
-                    "id": i + 1,
-                    "title": news["title"],
-                    "source": news["source"],
-                    "time": f"{random.randint(5, 60)}分钟前",
-                    "impact": random.randint(50, 95),
-                    "sentiment": news["sentiment"],
-                    "analysis": news["analysis"],
-                }
-            )
-        return result
-
     def _fetch():
         try:
             import akshare as ak
@@ -266,13 +206,19 @@ async def get_news_stream():
                     sentiment = "bullish"
                 if any(k in str(title) for k in ["大跌", "新低", "利空", "下滑"]):
                     sentiment = "bearish"
+                
+                # Deterministic impact based on sentiment
+                impact = 75
+                if sentiment == "bullish" or sentiment == "bearish":
+                    impact = 90
+                
                 result.append(
                     {
                         "id": i + 1,
                         "title": str(title),
                         "source": str(source) if source else "",
                         "time": str(time_val),
-                        "impact": random.randint(50, 95),
+                        "impact": impact,
                         "sentiment": sentiment,
                         "analysis": "",
                     }
@@ -287,20 +233,11 @@ async def get_news_stream():
         timeout_s=6.0,
         fail_delay_s=30.0,
         fetch_fn=_fetch,
-        fallback_fn=_mock,
+        fallback_fn=lambda: [],
     )
 
 @router.get("/risk/metrics", response_model=RiskMetrics)
 async def get_risk_metrics():
-    def _mock():
-        return {
-            "var95": 12500 + random.randint(-1000, 1000),
-            "var99": 18000 + random.randint(-1500, 1500),
-            "beta": round(1.12 + random.uniform(-0.1, 0.1), 2),
-            "sharpe": round(1.85 + random.uniform(-0.2, 0.2), 2),
-            "maxDrawdown": round(-12.5 + random.uniform(-2, 2), 2),
-        }
-
     def _fetch():
         try:
             import akshare as ak
@@ -323,12 +260,20 @@ async def get_risk_metrics():
             cumulative = (1 + returns).cumprod()
             rolling_max = cumulative.cummax()
             drawdown = (cumulative / rolling_max - 1).min()
+            
+            # Prepare chart data (last 30 points for display)
+            chart_data = cumulative.tail(30)
+            dates = [d.strftime("%Y-%m-%d") for d in chart_data.index]
+            curve = [round(float(v) * portfolio_value, 2) for v in chart_data.values]
+            
             return {
                 "var95": round(float(var95), 2),
                 "var99": round(float(var99), 2),
                 "beta": 1.0,
                 "sharpe": round(float(sharpe), 2),
                 "maxDrawdown": round(float(drawdown) * 100, 2),
+                "curve": curve,
+                "dates": dates
             }
         except Exception:
             return None
@@ -339,31 +284,11 @@ async def get_risk_metrics():
         timeout_s=8.0,
         fail_delay_s=120.0,
         fetch_fn=_fetch,
-        fallback_fn=_mock,
+        fallback_fn=lambda: None,
     )
 
 @router.get("/risk/correlation")
 async def get_risk_correlation():
-    def _mock():
-        assets = ["股票", "债券", "黄金", "原油", "现金"]
-        matrix = [
-            [1.0, -0.2, 0.1, 0.3, 0.0],
-            [-0.2, 1.0, 0.4, -0.1, 0.0],
-            [0.1, 0.4, 1.0, 0.2, 0.0],
-            [0.3, -0.1, 0.2, 1.0, 0.0],
-            [0.0, 0.0, 0.0, 0.0, 1.0],
-        ]
-        for i in range(5):
-            for j in range(i + 1, 5):
-                val = matrix[i][j] + random.uniform(-0.05, 0.05)
-                matrix[i][j] = round(val, 2)
-                matrix[j][i] = round(val, 2)
-        flat_data = []
-        for i in range(5):
-            for j in range(5):
-                flat_data.append([i, j, matrix[i][j]])
-        return {"assets": assets, "matrix": flat_data}
-
     def _fetch():
         try:
             import akshare as ak
@@ -393,20 +318,69 @@ async def get_risk_correlation():
         except Exception:
             return None
 
-    return await _get_or_refresh(
+    cached = await _get_or_refresh(
         _risk_corr_cache,
         ttl_s=300.0,
         timeout_s=10.0,
         fail_delay_s=120.0,
         fetch_fn=_fetch,
-        fallback_fn=_mock,
+        fallback_fn=lambda: None,
     )
+    return cached or {"assets": [], "matrix": []}
 
 @router.get("/risk/stress-test", response_model=List[StressTest])
 async def get_stress_test():
-    return [
-        { "scenario": "2008 金融危机重演", "impact": "-25.4%", "probability": "Low" },
-        { "scenario": "美联储加息 100bp", "impact": "-8.2%", "probability": "Medium" },
-        { "scenario": "地缘冲突升级 (原油暴涨)", "impact": "+3.5%", "probability": "Medium" },
-        { "scenario": "科技股泡沫破裂", "impact": "-15.8%", "probability": "Low" }
-    ]
+    def _fetch():
+        try:
+            import akshare as ak
+            import pandas as pd
+            
+            # Fetch long history for stress test
+            df = ak.stock_zh_index_daily_em(symbol="sh000001")
+            if df is None or df.empty:
+                return None
+            
+            # Scenarios
+            # 1. 2015 Crash (June 2015)
+            # 2. 2018 Trade War
+            # 3. 2020 Covid
+            # 4. Recent Low
+            
+            df['date'] = pd.to_datetime(df['date'])
+            df.set_index('date', inplace=True)
+            close = pd.to_numeric(df['close'])
+            
+            scenarios = [
+                {"name": "2015股灾", "start": "2015-06-12", "end": "2015-08-26"},
+                {"name": "2018贸易战", "start": "2018-01-24", "end": "2018-12-28"},
+                {"name": "2020疫情", "start": "2020-01-14", "end": "2020-03-19"},
+                {"name": "近期回调", "start": "2023-05-09", "end": "2024-02-05"},
+            ]
+            
+            result = []
+            for s in scenarios:
+                try:
+                    start_price = close.asof(s["start"])
+                    end_price = close.asof(s["end"])
+                    if pd.isna(start_price) or pd.isna(end_price):
+                        continue
+                    drop = (end_price - start_price) / start_price
+                    impact_str = f"{drop*100:.1f}%"
+                    
+                    # Probability (simplified estimation based on frequency of such drops)
+                    prob = "Low"
+                    if abs(drop) < 0.1: prob = "High"
+                    elif abs(drop) < 0.2: prob = "Medium"
+                    
+                    result.append({
+                        "scenario": s["name"],
+                        "impact": impact_str,
+                        "probability": prob
+                    })
+                except:
+                    continue
+            return result
+        except Exception:
+            return []
+            
+    return await asyncio.to_thread(_fetch) or []

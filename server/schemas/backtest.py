@@ -10,3 +10,4 @@ class BacktestRequest(BaseModel):
     end_date: Optional[str] = None
     initial_cash: float = 1000000.0
     strategy_code: Optional[str] = None
+    asset_type: Optional[str] = None

@@ -48,7 +48,12 @@ const InnerApp = () => {
         // Fetch Symbols
         axios.get(`${API_BASE_URL}/api/symbols`)
             .then(res => {
-                setSymbols(res.data.futures);
+                const futures = res.data.futures || [];
+                const stocks = res.data.stocks || [];
+                setSymbols([...stocks, ...futures]); // Stocks first or Futures first? Maybe stocks first is better for visibility if user scrolls up? Or keep futures first as it's the main focus.
+                // Let's put futures first as per original design, but append stocks.
+                // Actually user asked for "stock backtest support", so maybe mix or sort?
+                // Just appending is safe.
             })
             .catch(err => {
                 console.error(err);

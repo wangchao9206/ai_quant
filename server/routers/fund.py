@@ -2,7 +2,6 @@ from fastapi import APIRouter
 from typing import List
 from pydantic import BaseModel
 import asyncio
-import random
 import math
 import threading
 import time
@@ -72,28 +71,7 @@ async def get_fund_list():
 
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else _mock_fund_list()
-
-
-def _mock_fund_list():
-    funds = [
-        {"code": "000001", "name": "华夏成长混合", "manager": "王经理", "type": "Hybrid"},
-        {"code": "110011", "name": "易方达蓝筹精选", "manager": "张经理", "type": "Stock"},
-        {"code": "519732", "name": "交银定期支付双息", "manager": "杨经理", "type": "Hybrid"},
-        {"code": "005827", "name": "易方达蓝筹精选", "manager": "张坤", "type": "Stock"},
-        {"code": "161725", "name": "招商中证白酒", "manager": "侯昊", "type": "Index"},
-    ]
-    result = []
-    for i, f in enumerate(funds):
-        result.append({
-            "key": str(i + 1),
-            **f,
-            "nav": f"{random.uniform(1, 5):.4f}",
-            "return1y": round(random.uniform(-10, 20), 1),
-            "sharpe": round(random.uniform(1, 3), 1),
-            "maxdd": round(random.uniform(-25, -5), 1),
-        })
-    return result
+    return cached if cached is not None else []
 
 
 def _fetch_fund_list_akshare():
@@ -134,11 +112,13 @@ def _fetch_fund_list_akshare():
                 "name": str(name) if name else str(code),
                 "manager": str(manager),
                 "type": str(ftype),
-                "nav": f"{nav:.4f}" if nav is not None else f"{random.uniform(1, 5):.4f}",
-                "return1y": round(return1y if return1y is not None else random.uniform(-10, 20), 1),
-                "sharpe": round(sharpe if sharpe is not None else random.uniform(1, 3), 1),
-                "maxdd": round(maxdd if maxdd is not None else random.uniform(-25, -5), 1),
+                "nav": f"{nav:.4f}" if nav is not None else "0.0000",
+                "return1y": round(return1y if return1y is not None else 0.0, 1),
+                "sharpe": round(sharpe if sharpe is not None else 0.0, 1),
+                "maxdd": round(maxdd if maxdd is not None else 0.0, 1),
             })
+        # Sort by code to keep the list stable (prevent jumping)
+        result.sort(key=lambda x: x['code'])
         if result:
             return result
     return []

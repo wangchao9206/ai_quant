@@ -87,22 +87,18 @@ class DataManager:
             print(f"Error loading local data for {symbol} {period}: {e}")
             return None
 
-    def fetch_and_update(self, symbol, period):
+    def fetch_and_update(self, symbol, period, asset_type="futures"):
         """
         从 AkShare 获取数据并更新本地存储
         """
         print(f"Fetching data for {symbol} ({period})...")
         try:
-            import akshare as ak  # Lazy import to avoid startup blocking
+            import akshare as ak
             new_df = None
             if period == 'weekly':
-                # For weekly data, we fetch daily data first and resample
-                # This ensures we have the base data and it's up to date
-                df_daily = self.fetch_and_update(symbol, 'daily')
+                df_daily = self.fetch_and_update(symbol, 'daily', asset_type=asset_type)
                 if df_daily is None or df_daily.empty:
                     return None
-                
-                # Resample to weekly (Friday ending)
                 agg_dict = {
                     'Open': 'first',
                     'High': 'max',
@@ -111,32 +107,51 @@ class DataManager:
                     'Volume': 'sum',
                     'OpenInterest': 'last'
                 }
-                # Filter keys that exist in df_daily
                 agg_dict = {k: v for k, v in agg_dict.items() if k in df_daily.columns}
-                
                 new_df = df_daily.resample('W-FRI').agg(agg_dict)
                 new_df.dropna(inplace=True)
-                
             elif period == 'daily':
-                new_df = ak.futures_zh_daily_sina(symbol=symbol)
-                # 统一列名
-                new_df.rename(columns={
-                    'date': 'date', 'open': 'Open', 'high': 'High', 'low': 'Low',
-                    'close': 'Close', 'volume': 'Volume', 'hold': 'OpenInterest'
-                }, inplace=True)
-                # 确保 date 是 datetime
-                new_df['date'] = pd.to_datetime(new_df['date'])
-                new_df.set_index('date', inplace=True)
-                
+                if asset_type == "stock":
+                    new_df = ak.stock_zh_a_hist(symbol=symbol, period="daily", adjust="qfq")
+                    new_df.rename(columns={
+                        '日期': 'date',
+                        '开盘': 'Open',
+                        '最高': 'High',
+                        '最低': 'Low',
+                        '收盘': 'Close',
+                        '成交量': 'Volume'
+                    }, inplace=True)
+                    new_df['date'] = pd.to_datetime(new_df['date'])
+                    new_df.set_index('date', inplace=True)
+                else:
+                    new_df = ak.futures_zh_daily_sina(symbol=symbol)
+                    new_df.rename(columns={
+                        'date': 'date', 'open': 'Open', 'high': 'High', 'low': 'Low',
+                        'close': 'Close', 'volume': 'Volume', 'hold': 'OpenInterest'
+                    }, inplace=True)
+                    new_df['date'] = pd.to_datetime(new_df['date'])
+                    new_df.set_index('date', inplace=True)
             else:
-                # 分钟数据
-                new_df = ak.futures_zh_minute_sina(symbol=symbol, period=period)
-                new_df.rename(columns={
-                    'datetime': 'datetime', 'open': 'Open', 'high': 'High', 'low': 'Low',
-                    'close': 'Close', 'volume': 'Volume', 'hold': 'OpenInterest'
-                }, inplace=True)
-                new_df['datetime'] = pd.to_datetime(new_df['datetime'])
-                new_df.set_index('datetime', inplace=True)
+                if asset_type == "stock":
+                    new_df = ak.stock_zh_a_hist_min_em(symbol=symbol, period=period, adjust="qfq")
+                    new_df.rename(columns={
+                        '时间': 'datetime',
+                        '开盘': 'Open',
+                        '最高': 'High',
+                        '最低': 'Low',
+                        '收盘': 'Close',
+                        '成交量': 'Volume'
+                    }, inplace=True)
+                    new_df['datetime'] = pd.to_datetime(new_df['datetime'])
+                    new_df.set_index('datetime', inplace=True)
+                else:
+                    new_df = ak.futures_zh_minute_sina(symbol=symbol, period=period)
+                    new_df.rename(columns={
+                        'datetime': 'datetime', 'open': 'Open', 'high': 'High', 'low': 'Low',
+                        'close': 'Close', 'volume': 'Volume', 'hold': 'OpenInterest'
+                    }, inplace=True)
+                    new_df['datetime'] = pd.to_datetime(new_df['datetime'])
+                    new_df.set_index('datetime', inplace=True)
 
             # 转换数值列
             cols = ['Open', 'High', 'Low', 'Close', 'Volume', 'OpenInterest']
@@ -171,7 +186,7 @@ class DataManager:
             traceback.print_exc()
             return None
 
-    def get_data_with_fallback(self, symbol, period, start_date=None, end_date=None):
+    def get_data_with_fallback(self, symbol, period, start_date=None, end_date=None, asset_type="futures"):
         """
         优先读取本地，如果本地没有或需要更新（简单的策略是：如果本地没有则下载），
         为了性能，我们假设如果有本地文件，就直接用。
@@ -182,7 +197,7 @@ class DataManager:
         # 如果本地没有数据，强制下载
         if df is None or df.empty:
             print(f"No local data for {symbol} {period}, fetching...")
-            full_df = self.fetch_and_update(symbol, period)
+            full_df = self.fetch_and_update(symbol, period, asset_type=asset_type)
             if full_df is not None:
                 # 重新应用日期过滤
                 df = full_df

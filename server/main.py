@@ -33,10 +33,8 @@ try:
     print("Importing core modules...")
     # import akshare as ak # Removed to avoid startup blocking
     import datetime
-    from sqlalchemy import func, desc, asc
-    from sqlalchemy.orm import Session
     from core.constants import get_multiplier
-    from core.database import init_db, SessionLocal, BacktestRecord
+    from core.database import BacktestStore, init_mongo, get_backtest_store
     from core.data_manager import data_manager
     from core.engine import BacktestEngine
     from core.optimizer import StrategyOptimizer
@@ -48,33 +46,29 @@ except Exception as e:
     sys.exit(1)
 
 try:
-    print("Initializing database...")
-    # 初始化数据库
-    init_db()
-    print("Database initialized.")
+    print("Initializing MongoDB...")
+    init_mongo()
+    print("MongoDB initialized.")
 except Exception as e:
-    print(f"CRITICAL: Failed to initialize database: {e}")
+    print(f"CRITICAL: Failed to initialize MongoDB: {e}")
     traceback.print_exc()
     sys.exit(1)
 
 app = FastAPI(debug=True)
 
 # 注册新的路由
-from routers import market, analysis, stock, fund, derivatives, commodities
+from routers import market, analysis, stock, fund, derivatives, commodities, tdx
 app.include_router(market.router, prefix="/api/market", tags=["Market"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["Analysis"])
 app.include_router(stock.router, prefix="/api/stock", tags=["Stock"])
+app.include_router(tdx.router, prefix="/api/tdx", tags=["TDX"])
 app.include_router(fund.router, prefix="/api/fund", tags=["Fund"])
 app.include_router(derivatives.router, prefix="/api/derivatives", tags=["Derivatives"])
 app.include_router(commodities.router, prefix="/api/commodities", tags=["Commodities"])
 
 # 数据库依赖
 def get_db():
-    db = SessionLocal()
-    try:
-        yield db
-    finally:
-        db.close()
+    yield get_backtest_store()
 
 # 配置 CORS
 app.add_middleware(
@@ -94,9 +88,10 @@ class BacktestRequest(BaseModel):
     end_date: Optional[str] = None   # 结束时间 (YYYY-MM-DD)
     initial_cash: float = 1000000.0 # 初始本金
     strategy_code: Optional[str] = None # 自定义策略代码
+    asset_type: Optional[str] = None
 
 @app.get("/api/strategies/recommended")
-async def get_recommended_strategies(db: Session = Depends(get_db)):
+async def get_recommended_strategies(db: BacktestStore = Depends(get_db)):
     """
     获取推荐策略：
     1. 从历史回测中筛选表现最好的 (Top 3 by Return Rate)
@@ -105,27 +100,24 @@ async def get_recommended_strategies(db: Session = Depends(get_db)):
     recommendations = []
     
     # 1. 查询历史最佳
-    top_records = db.query(BacktestRecord).filter(
-        BacktestRecord.return_rate > 10, # 至少正收益
-        BacktestRecord.total_trades > 5  # 至少有一定交易量
-    ).order_by(desc(BacktestRecord.return_rate)).limit(3).all()
+    top_records = db.top_records(min_return=10, min_trades=5, limit=3)
     
     for record in top_records:
         recommendations.append({
-            "id": f"hist_{record.id}",
-            "name": f"历史优选: {record.symbol} {record.period}策略",
-            "description": f"基于历史回测数据筛选的高收益策略，收益率 {record.return_rate:.2f}%",
+            "id": f"hist_{record.get('id')}",
+            "name": f"历史优选: {record.get('symbol')} {record.get('period')}策略",
+            "description": f"基于历史回测数据筛选的高收益策略，收益率 {float(record.get('return_rate') or 0):.2f}%",
             "tags": ["高收益", "历史验证"],
             "metrics": {
-                "return_rate": record.return_rate,
-                "win_rate": record.win_rate,
-                "max_drawdown": record.max_drawdown,
-                "sharpe_ratio": record.sharpe_ratio
+                "return_rate": record.get("return_rate"),
+                "win_rate": record.get("win_rate"),
+                "max_drawdown": record.get("max_drawdown"),
+                "sharpe_ratio": record.get("sharpe_ratio")
             },
             "config": {
-                "symbol": record.symbol,
-                "period": record.period,
-                "strategy_params": record.strategy_params
+                "symbol": record.get("symbol"),
+                "period": record.get("period"),
+                "strategy_params": record.get("strategy_params")
             },
             "source": "history",
             "usage_guide": "此策略基于历史数据挖掘，建议在相似的市场环境（波动率、趋势性）下使用。请先进行模拟交易验证。",
@@ -192,13 +184,13 @@ async def get_recommended_strategies(db: Session = Depends(get_db)):
             "description": "基于 5 分钟 K 线的极速策略，利用 3/10 均线交叉，严格止损，不留隔夜仓。",
             "tags": ["超短线", "日内", "高风险"],
             "metrics": {
-                "return_rate": 15.0, # 模拟数据
-                "win_rate": 55.0,
-                "max_drawdown": 5.0,
-                "sharpe_ratio": 1.8
+                "return_rate": 0,
+                "win_rate": 0,
+                "max_drawdown": 0,
+                "sharpe_ratio": 0
             },
             "config": {
-                "symbol": "SH0",
+                "symbol": "SH000001",
                 "period": "5",
                 "strategy_params": {
                     "fast_period": 3,
@@ -223,7 +215,7 @@ async def get_recommended_strategies(db: Session = Depends(get_db)):
     return recommendations
 
 @app.post("/api/backtest")
-async def run_backtest(request: BacktestRequest, db: Session = Depends(get_db)):
+async def run_backtest(request: BacktestRequest, db: BacktestStore = Depends(get_db)):
     print(f"收到回测请求: {request.symbol}, {request.period}, {request.strategy_params}, 自动优化: {request.auto_optimize}, 时间段: {request.start_date} - {request.end_date}, 本金: {request.initial_cash}")
     
     strategy_class = None
@@ -244,6 +236,7 @@ async def run_backtest(request: BacktestRequest, db: Session = Depends(get_db)):
             raise HTTPException(status_code=400, detail=f"Invalid strategy code: {str(e)}")
 
     engine = BacktestEngine()
+    asset_type = request.asset_type or infer_asset_type(request.symbol)
     
     # 1. 运行初始回测
     result = engine.run(
@@ -253,7 +246,8 @@ async def run_backtest(request: BacktestRequest, db: Session = Depends(get_db)):
         start_date=request.start_date,
         end_date=request.end_date,
         initial_cash=request.initial_cash,
-        strategy_class=strategy_class
+        strategy_class=strategy_class,
+        asset_type=asset_type
     )
     
     if "error" in result:
@@ -267,25 +261,25 @@ async def run_backtest(request: BacktestRequest, db: Session = Depends(get_db)):
     return_rate = (net_profit / initial_cash) * 100
     
     # 保存初始结果
-    record = BacktestRecord(
-        symbol=request.symbol,
-        period=request.period,
-        strategy_params=request.strategy_params,
-        initial_cash=initial_cash,
-        final_value=final_value,
-        net_profit=net_profit,
-        return_rate=return_rate,
-        sharpe_ratio=result['metrics']['sharpe_ratio'],
-        max_drawdown=result['metrics']['max_drawdown'],
-        total_trades=result['metrics']['total_trades'],
-        win_rate=result['metrics']['win_rate'],
-        is_optimized=0,
-        equity_curve=result.get('equity_curve', []),
-        logs=result.get('logs', [])
+    db.insert_record(
+        {
+            "symbol": request.symbol,
+            "period": request.period,
+            "strategy_params": request.strategy_params,
+            "asset_type": asset_type,
+            "initial_cash": initial_cash,
+            "final_value": final_value,
+            "net_profit": net_profit,
+            "return_rate": return_rate,
+            "sharpe_ratio": result["metrics"]["sharpe_ratio"],
+            "max_drawdown": result["metrics"]["max_drawdown"],
+            "total_trades": result["metrics"]["total_trades"],
+            "win_rate": result["metrics"]["win_rate"],
+            "is_optimized": 0,
+            "equity_curve": result.get("equity_curve", []),
+            "logs": result.get("logs", []),
+        }
     )
-    db.add(record)
-    db.commit()
-    db.refresh(record)
     
     # 2. 检查是否需要自动优化
     optimized_result = None
@@ -300,7 +294,8 @@ async def run_backtest(request: BacktestRequest, db: Session = Depends(get_db)):
             target_return=20.0,
             start_date=request.start_date,
             end_date=request.end_date,
-            initial_cash=initial_cash
+            initial_cash=initial_cash,
+            asset_type=asset_type
         )
         
         if best_res:
@@ -316,24 +311,25 @@ async def run_backtest(request: BacktestRequest, db: Session = Depends(get_db)):
                 optimization_msg = f"原始收益率 {return_rate:.2f}% 未达标 (<20%)。已自动优化参数，新收益率 {opt_return_rate:.2f}%。"
                 
                 # 保存优化后的结果
-                opt_record = BacktestRecord(
-                    symbol=request.symbol,
-                    period=request.period,
-                    strategy_params=best_params,
-                    initial_cash=initial_cash,
-                    final_value=opt_final_value,
-                    net_profit=opt_net_profit,
-                    return_rate=opt_return_rate,
-                    sharpe_ratio=best_res['metrics']['sharpe_ratio'],
-                    max_drawdown=best_res['metrics']['max_drawdown'],
-                    total_trades=best_res['metrics']['total_trades'],
-                    win_rate=best_res['metrics']['win_rate'],
-                    is_optimized=1,
-                    equity_curve=best_res.get('equity_curve', []),
-                    logs=best_res.get('logs', [])
+                db.insert_record(
+                    {
+                        "symbol": request.symbol,
+                        "period": request.period,
+                        "strategy_params": best_params,
+                        "asset_type": asset_type,
+                        "initial_cash": initial_cash,
+                        "final_value": opt_final_value,
+                        "net_profit": opt_net_profit,
+                        "return_rate": opt_return_rate,
+                        "sharpe_ratio": best_res["metrics"]["sharpe_ratio"],
+                        "max_drawdown": best_res["metrics"]["max_drawdown"],
+                        "total_trades": best_res["metrics"]["total_trades"],
+                        "win_rate": best_res["metrics"]["win_rate"],
+                        "is_optimized": 1,
+                        "equity_curve": best_res.get("equity_curve", []),
+                        "logs": best_res.get("logs", []),
+                    }
                 )
-                db.add(opt_record)
-                db.commit()
             else:
                 optimization_msg = "自动优化尝试未找到更好的参数组合。"
         else:
@@ -473,102 +469,43 @@ async def get_backtest_history(
     min_return: Optional[float] = None,
     sort_by: str = "timestamp",
     order: str = "desc",
-    db: Session = Depends(get_db)
+    db: BacktestStore = Depends(get_db)
 ):
-    query = db.query(BacktestRecord)
-    
-    if symbol:
-        query = query.filter(BacktestRecord.symbol == symbol)
-    if start_date:
-        query = query.filter(BacktestRecord.timestamp >= datetime.datetime.strptime(start_date, "%Y-%m-%d"))
-    if end_date:
-        query = query.filter(BacktestRecord.timestamp <= datetime.datetime.strptime(end_date, "%Y-%m-%d") + datetime.timedelta(days=1))
-    if min_return is not None:
-        query = query.filter(BacktestRecord.return_rate >= min_return)
-        
-    total = query.count()
-    
-    sort_attr = BacktestRecord.timestamp
-    if sort_by == "return_rate":
-        sort_attr = BacktestRecord.return_rate
-    elif sort_by == "sharpe_ratio":
-        sort_attr = BacktestRecord.sharpe_ratio
-    elif sort_by == "max_drawdown":
-        sort_attr = BacktestRecord.max_drawdown
-        
-    if order == "asc":
-        query = query.order_by(asc(sort_attr))
-    else:
-        query = query.order_by(desc(sort_attr))
-        
-    records = query.offset(skip).limit(limit).all()
-    
-    # 不返回大数据量的 logs 和 equity_curve 以提高列表加载速度
-    result_list = []
-    for r in records:
-        result_list.append({
-            "id": r.id,
-            "timestamp": r.timestamp,
-            "symbol": r.symbol,
-            "period": r.period,
-            "initial_cash": r.initial_cash,
-            "final_value": r.final_value,
-            "net_profit": r.net_profit,
-            "return_rate": r.return_rate,
-            "sharpe_ratio": r.sharpe_ratio,
-            "max_drawdown": r.max_drawdown,
-            "total_trades": r.total_trades,
-            "win_rate": r.win_rate,
-            "is_optimized": r.is_optimized,
-            "strategy_params": r.strategy_params
-        })
-        
-    return {"total": total, "items": result_list}
+    return db.list_history(
+        skip=skip,
+        limit=limit,
+        symbol=symbol,
+        start_date=start_date,
+        end_date=end_date,
+        min_return=min_return,
+        sort_by=sort_by,
+        order=order,
+        include_big_fields=False,
+    )
 
 @app.get("/api/backtest/history/{record_id}")
-async def get_backtest_detail(record_id: int, db: Session = Depends(get_db)):
-    record = db.query(BacktestRecord).filter(BacktestRecord.id == record_id).first()
-    if not record:
+async def get_backtest_detail(record_id: int, db: BacktestStore = Depends(get_db)):
+    record = db.get_record(record_id)
+    if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
-        
-    # Return full details including logs (trades) and equity_curve
-    return {
-        "id": record.id,
-        "timestamp": record.timestamp,
-        "symbol": record.symbol,
-        "period": record.period,
-        "initial_cash": record.initial_cash,
-        "final_value": record.final_value,
-        "net_profit": record.net_profit,
-        "return_rate": record.return_rate,
-        "sharpe_ratio": record.sharpe_ratio,
-        "max_drawdown": record.max_drawdown,
-        "total_trades": record.total_trades,
-        "win_rate": record.win_rate,
-        "is_optimized": record.is_optimized,
-        "strategy_params": record.strategy_params,
-        "logs": record.logs, # Contains trade list
-        "equity_curve": record.equity_curve
-    }
+    return record
 
 @app.get("/api/strategy/correlation")
 async def get_strategy_correlation(
     ids: Optional[str] = None,
     limit: int = 5,
-    db: Session = Depends(get_db)
+    db: BacktestStore = Depends(get_db)
 ):
-    query = db.query(BacktestRecord)
-    
     selected_records = []
     if ids:
         try:
             id_list = [int(i) for i in ids.split(",")]
-            selected_records = query.filter(BacktestRecord.id.in_(id_list)).all()
+            selected_records = db.get_records_by_ids(id_list)
         except:
             pass
     else:
         # Default to top return strategies
-        selected_records = query.order_by(desc(BacktestRecord.return_rate)).limit(limit).all()
+        selected_records = db.list_history(skip=0, limit=limit, sort_by="return_rate", order="desc", include_big_fields=True).get("items", [])
         
     if not selected_records:
         return {"labels": [], "matrix": []}
@@ -577,16 +514,15 @@ async def get_strategy_correlation(
     data = {}
     for r in selected_records:
         # equity_curve is a list of dicts: [{'date': '2023-01-01', 'value': 100000, 'return': 0.0}, ...]
-        if not r.equity_curve:
+        curve = r.get("equity_curve")
+        if not curve:
             continue
             
         # Parse equity curve
         dates = []
         returns = []
         # Ensure equity_curve is a list (it might be stored as JSON)
-        curve = r.equity_curve
         if isinstance(curve, str):
-            import json
             try:
                 curve = json.loads(curve)
             except:
@@ -603,10 +539,10 @@ async def get_strategy_correlation(
                 dt_index = pd.to_datetime(dates)
                 s = pd.Series(returns, index=dt_index)
                 # Label: ID - Symbol
-                label = f"#{r.id} {r.symbol}"
+                label = f"#{r.get('id')} {r.get('symbol')}"
                 data[label] = s
             except Exception as e:
-                print(f"Error parsing dates for record {r.id}: {e}")
+                print(f"Error parsing dates for record {r.get('id')}: {e}")
                 continue
 
     if not data:
@@ -648,42 +584,8 @@ async def get_strategy_correlation(
         return {"labels": [], "matrix": []}
 
 @app.get("/api/backtest/stats")
-async def get_backtest_stats(db: Session = Depends(get_db)):
-    total_count = db.query(BacktestRecord).count()
-    if total_count == 0:
-        return {
-            "total_count": 0,
-            "avg_return": 0,
-            "avg_sharpe": 0,
-            "avg_drawdown": 0,
-            "positive_count": 0,
-            "win_rate_avg": 0
-        }
-        
-    avg_return = db.query(func.avg(BacktestRecord.return_rate)).scalar() or 0
-    avg_sharpe = db.query(func.avg(BacktestRecord.sharpe_ratio)).scalar() or 0
-    avg_drawdown = db.query(func.avg(BacktestRecord.max_drawdown)).scalar() or 0
-    positive_count = db.query(BacktestRecord).filter(BacktestRecord.net_profit > 0).count()
-    win_rate_avg = db.query(func.avg(BacktestRecord.win_rate)).scalar() or 0
-    
-    # 简单的收益分布 (例如：<-10%, -10~0%, 0~10%, 10~30%, >30%)
-    return_dist = {
-        "<-10%": db.query(BacktestRecord).filter(BacktestRecord.return_rate < -10).count(),
-        "-10%~0%": db.query(BacktestRecord).filter(BacktestRecord.return_rate >= -10, BacktestRecord.return_rate < 0).count(),
-        "0%~10%": db.query(BacktestRecord).filter(BacktestRecord.return_rate >= 0, BacktestRecord.return_rate < 10).count(),
-        "10%~30%": db.query(BacktestRecord).filter(BacktestRecord.return_rate >= 10, BacktestRecord.return_rate < 30).count(),
-        ">30%": db.query(BacktestRecord).filter(BacktestRecord.return_rate >= 30).count(),
-    }
-    
-    return {
-        "total_count": total_count,
-        "avg_return": avg_return,
-        "avg_sharpe": avg_sharpe,
-        "avg_drawdown": avg_drawdown,
-        "positive_count": positive_count,
-        "win_rate_avg": win_rate_avg,
-        "return_distribution": return_dist
-    }
+async def get_backtest_stats(db: BacktestStore = Depends(get_db)):
+    return db.stats()
 
 @app.get("/api/backtest/export")
 async def export_backtest_history(
@@ -691,36 +593,26 @@ async def export_backtest_history(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     min_return: Optional[float] = None,
-    db: Session = Depends(get_db)
+    db: BacktestStore = Depends(get_db)
 ):
-    query = db.query(BacktestRecord)
-    if symbol:
-        query = query.filter(BacktestRecord.symbol == symbol)
-    if start_date:
-        query = query.filter(BacktestRecord.timestamp >= datetime.datetime.strptime(start_date, "%Y-%m-%d"))
-    if end_date:
-        query = query.filter(BacktestRecord.timestamp <= datetime.datetime.strptime(end_date, "%Y-%m-%d") + datetime.timedelta(days=1))
-    if min_return is not None:
-        query = query.filter(BacktestRecord.return_rate >= min_return)
-    
-    records = query.order_by(desc(BacktestRecord.timestamp)).all()
+    records = db.export_records(symbol=symbol, start_date=start_date, end_date=end_date, min_return=min_return)
     
     data = []
     for r in records:
         data.append({
-            "ID": r.id,
-            "Timestamp": r.timestamp,
-            "Symbol": r.symbol,
-            "Period": r.period,
-            "Initial Cash": r.initial_cash,
-            "Final Value": r.final_value,
-            "Net Profit": r.net_profit,
-            "Return Rate (%)": r.return_rate,
-            "Sharpe Ratio": r.sharpe_ratio,
-            "Max Drawdown (%)": r.max_drawdown,
-            "Total Trades": r.total_trades,
-            "Win Rate (%)": r.win_rate,
-            "Is Optimized": r.is_optimized
+            "ID": r.get("id"),
+            "Timestamp": r.get("timestamp"),
+            "Symbol": r.get("symbol"),
+            "Period": r.get("period"),
+            "Initial Cash": r.get("initial_cash"),
+            "Final Value": r.get("final_value"),
+            "Net Profit": r.get("net_profit"),
+            "Return Rate (%)": r.get("return_rate"),
+            "Sharpe Ratio": r.get("sharpe_ratio"),
+            "Max Drawdown (%)": r.get("max_drawdown"),
+            "Total Trades": r.get("total_trades"),
+            "Win Rate (%)": r.get("win_rate"),
+            "Is Optimized": r.get("is_optimized")
         })
     
     df = pd.DataFrame(data)
@@ -740,19 +632,9 @@ async def export_backtest_history_pdf(
     start_date: Optional[str] = None,
     end_date: Optional[str] = None,
     min_return: Optional[float] = None,
-    db: Session = Depends(get_db)
+    db: BacktestStore = Depends(get_db)
 ):
-    query = db.query(BacktestRecord)
-    if symbol:
-        query = query.filter(BacktestRecord.symbol == symbol)
-    if start_date:
-        query = query.filter(BacktestRecord.timestamp >= datetime.datetime.strptime(start_date, "%Y-%m-%d"))
-    if end_date:
-        query = query.filter(BacktestRecord.timestamp <= datetime.datetime.strptime(end_date, "%Y-%m-%d") + datetime.timedelta(days=1))
-    if min_return is not None:
-        query = query.filter(BacktestRecord.return_rate >= min_return)
-    
-    records = query.order_by(desc(BacktestRecord.timestamp)).all()
+    records = db.export_records(symbol=symbol, start_date=start_date, end_date=end_date, min_return=min_return)
     
     buffer = io.BytesIO()
     doc = SimpleDocTemplate(buffer, pagesize=landscape(letter))
@@ -766,15 +648,20 @@ async def export_backtest_history_pdf(
     # Limit columns to fit on page
     data = [['ID', 'Date', 'Symbol', 'Return(%)', 'Sharpe', 'Drawdown(%)', 'Trades', 'WinRate(%)']]
     for r in records:
+        ts = r.get("timestamp")
+        if isinstance(ts, datetime.datetime):
+            dt_str = ts.strftime('%Y-%m-%d')
+        else:
+            dt_str = str(ts)[:10] if ts else ""
         data.append([
-            str(r.id),
-            r.timestamp.strftime('%Y-%m-%d'),
-            r.symbol,
-            f"{r.return_rate:.2f}" if r.return_rate is not None else "0.00",
-            f"{r.sharpe_ratio:.2f}" if r.sharpe_ratio is not None else "0.00",
-            f"{r.max_drawdown:.2f}" if r.max_drawdown is not None else "0.00",
-            str(r.total_trades),
-            f"{r.win_rate:.2f}" if r.win_rate is not None else "0.00"
+            str(r.get("id")),
+            dt_str,
+            r.get("symbol"),
+            f"{float(r.get('return_rate') or 0):.2f}",
+            f"{float(r.get('sharpe_ratio') or 0):.2f}",
+            f"{float(r.get('max_drawdown') or 0):.2f}",
+            str(r.get("total_trades") or 0),
+            f"{float(r.get('win_rate') or 0):.2f}"
         ])
     
     # Simple pagination if too many records? ReportLab handles page breaks automatically with SimpleDocTemplate
@@ -805,28 +692,26 @@ async def export_backtest_history_pdf(
     return StreamingResponse(buffer, headers=headers, media_type='application/pdf')
 
 @app.get("/api/backtest/{record_id}")
-async def get_backtest_detail(record_id: int, db: Session = Depends(get_db)):
-    record = db.query(BacktestRecord).filter(BacktestRecord.id == record_id).first()
-    if not record:
+async def get_backtest_detail(record_id: int, db: BacktestStore = Depends(get_db)):
+    record = db.get_record(record_id)
+    if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
     return record
 
 @app.get("/api/strategy/summary/{record_id}")
-async def get_summary_report(record_id: int, db: Session = Depends(get_db)):
-    record = db.query(BacktestRecord).filter(BacktestRecord.id == record_id).first()
-    if not record:
+async def get_summary_report(record_id: int, db: BacktestStore = Depends(get_db)):
+    record = db.get_record(record_id)
+    if record is None:
         raise HTTPException(status_code=404, detail="Record not found")
         
     summary = generate_strategy_summary(record)
     return {"summary": summary}
 
 @app.delete("/api/backtest/{record_id}")
-async def delete_backtest(record_id: int, db: Session = Depends(get_db)):
-    record = db.query(BacktestRecord).filter(BacktestRecord.id == record_id).first()
-    if not record:
+async def delete_backtest(record_id: int, db: BacktestStore = Depends(get_db)):
+    ok = db.delete_record(record_id)
+    if not ok:
         raise HTTPException(status_code=404, detail="Record not found")
-    db.delete(record)
-    db.commit()
     return {"status": "success"}
 
 class StrategyCodeRequest(BaseModel):
@@ -879,12 +764,12 @@ async def generate_strategy(request: StrategyGenerationRequest):
         raise HTTPException(status_code=500, detail=str(e))
 
 # 缓存品种列表
-CACHED_SYMBOLS = []
+CACHED_SYMBOLS = {"futures": [], "stocks": []}
 LAST_CACHE_TIME = None
 SYMBOLS_REFRESHING = False
 SYMBOLS_NEXT_REFRESH = 0.0
 
-from core.data_loader import fetch_futures_data
+from core.data_loader import fetch_futures_data, infer_asset_type
 import math
 
 # Helper to clean NaNs for JSON
@@ -897,20 +782,43 @@ def clean_nan(x):
 def refresh_symbols_cache():
     global CACHED_SYMBOLS, LAST_CACHE_TIME, SYMBOLS_REFRESHING, SYMBOLS_NEXT_REFRESH
     try:
-        import akshare as ak
-
-        df = ak.futures_display_main_sina()
+        # 1. Fetch Futures
         futures_list = []
-        for _, row in df.iterrows():
-            symbol = row["symbol"]
-            name = row["name"]
-            multiplier = get_multiplier(symbol)
-            futures_list.append({"code": symbol, "name": f"{name} ({symbol})", "multiplier": multiplier})
-        if futures_list:
-            CACHED_SYMBOLS = futures_list
+        try:
+            import akshare as ak
+            df = ak.futures_display_main_sina()
+            for _, row in df.iterrows():
+                symbol = row["symbol"]
+                name = row["name"]
+                multiplier = get_multiplier(symbol)
+                futures_list.append({"code": symbol, "name": f"{name} ({symbol})", "multiplier": multiplier})
+        except Exception as e:
+            print(f"后台刷新期货列表失败: {e}")
+
+        # 2. Fetch Stocks (using stock router's helper)
+        stocks_list = []
+        try:
+            # Re-use the logic from stock router to avoid duplication
+            # Assuming stock router has _fetch_stock_list_tdx
+            stock_data = stock._fetch_stock_list_tdx()
+            for s in stock_data:
+                # Add multiplier 1 for stocks
+                stocks_list.append({
+                    "code": s["code"],
+                    "name": s["name"], 
+                    "multiplier": 1
+                })
+        except Exception as e:
+            print(f"后台刷新股票列表失败: {e}")
+
+        if futures_list or stocks_list:
+            CACHED_SYMBOLS = {
+                "futures": futures_list or CACHED_SYMBOLS.get("futures", []),
+                "stocks": stocks_list or CACHED_SYMBOLS.get("stocks", [])
+            }
             LAST_CACHE_TIME = datetime.datetime.now()
-            data_manager.save_symbols_list(futures_list)
-            SYMBOLS_NEXT_REFRESH = time.monotonic() + 60.0
+            data_manager.save_symbols_list(CACHED_SYMBOLS)
+            SYMBOLS_NEXT_REFRESH = time.monotonic() + 3600.0 # 1 hour refresh
     except Exception as e:
         print(f"后台刷新品种列表失败: {e}")
         SYMBOLS_NEXT_REFRESH = time.monotonic() + 60.0
@@ -922,17 +830,17 @@ async def get_symbols(background_tasks: BackgroundTasks):
     global CACHED_SYMBOLS, LAST_CACHE_TIME, SYMBOLS_REFRESHING, SYMBOLS_NEXT_REFRESH
     
     # 1. 内存缓存 (1小时失效)
-    if CACHED_SYMBOLS and LAST_CACHE_TIME:
+    if CACHED_SYMBOLS and CACHED_SYMBOLS.get("futures") and LAST_CACHE_TIME:
         if (datetime.datetime.now() - LAST_CACHE_TIME).total_seconds() < 3600:
-            return {"futures": CACHED_SYMBOLS}
+            return CACHED_SYMBOLS
             
     # 2. 本地文件缓存 (持久化)
     local_symbols = data_manager.get_symbols_list()
-    if local_symbols:
+    if local_symbols and isinstance(local_symbols, dict) and (local_symbols.get("futures") or local_symbols.get("stocks")):
         print("从本地缓存加载品种列表")
         CACHED_SYMBOLS = local_symbols
         LAST_CACHE_TIME = datetime.datetime.now()
-        return {"futures": CACHED_SYMBOLS}
+        return CACHED_SYMBOLS
         
     # 3. 网络获取 (如果本地没有)
     now = time.monotonic()
@@ -940,14 +848,16 @@ async def get_symbols(background_tasks: BackgroundTasks):
         SYMBOLS_REFRESHING = True
         background_tasks.add_task(refresh_symbols_cache)
 
-    return {
+    # Return default/fallback if cache empty
+    return CACHED_SYMBOLS if (CACHED_SYMBOLS.get("futures") or CACHED_SYMBOLS.get("stocks")) else {
         "futures": [
             {"code": "LH0", "name": "生猪主力 (LH0)", "multiplier": 16},
             {"code": "SH0", "name": "烧碱主力 (SH0)", "multiplier": 30},
             {"code": "RB0", "name": "螺纹钢主力 (RB0)", "multiplier": 10},
             {"code": "M0", "name": "豆粕主力 (M0)", "multiplier": 10},
             {"code": "IF0", "name": "沪深300 (IF0)", "multiplier": 300},
-        ]
+        ],
+        "stocks": []
     }
 
 # --- Scheduler for Data Updates ---

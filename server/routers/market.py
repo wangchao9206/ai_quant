@@ -3,11 +3,11 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import List, Dict, Optional
 from pydantic import BaseModel
 import asyncio
-import random
 import datetime
 import threading
 import time
 import pandas as pd
+from core.tdx_client import tdx_client
 
 router = APIRouter()
 
@@ -105,10 +105,12 @@ async def get_market_indices():
                 async def _refresh():
                     try:
                         try:
-                            data = await asyncio.wait_for(asyncio.to_thread(_fetch_market_indices_akshare), timeout=6.0)
-                        except Exception:
+                            # Use TDX for indices (Real-time)
+                            data = await asyncio.to_thread(tdx_client.get_index_quotes)
+                        except Exception as e:
+                            print(f"TDX indices failed: {e}")
                             with _cache_lock:
-                                _indices_cache["next"] = time.monotonic() + 15.0
+                                _indices_cache["next"] = time.monotonic() + 5.0
                             return
                         if data:
                             with _cache_lock:
@@ -120,7 +122,7 @@ async def get_market_indices():
 
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else _mock_market_indices()
+    return cached if cached is not None else []
 
 @router.get("/sectors", response_model=List[SectorInfo])
 async def get_market_sectors():
@@ -142,10 +144,11 @@ async def get_market_sectors():
                 async def _refresh():
                     try:
                         try:
-                            data = await asyncio.wait_for(asyncio.to_thread(_fetch_market_sectors_akshare), timeout=6.0)
-                        except Exception:
+                            data = await asyncio.wait_for(asyncio.to_thread(_fetch_market_sectors), timeout=10.0)
+                        except Exception as e:
+                            print(f"Sector fetch failed: {e}")
                             with _cache_lock:
-                                _sectors_cache["next"] = time.monotonic() + 20.0
+                                _sectors_cache["next"] = time.monotonic() + 10.0
                             return
                         if data:
                             with _cache_lock:
@@ -157,144 +160,44 @@ async def get_market_sectors():
 
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else _mock_market_sectors()
+    return cached if cached is not None else []
 
 
-def _mock_market_indices():
-    return [
-        {"name": "上证指数", "value": 3200.50 + random.uniform(-10, 10), "change": 1.25 + random.uniform(-0.2, 0.2), "volume": "4500亿"},
-        {"name": "深证成指", "value": 10502.20 + random.uniform(-30, 30), "change": -0.50 + random.uniform(-0.2, 0.2), "volume": "5800亿"},
-        {"name": "创业板指", "value": 2200.15 + random.uniform(-10, 10), "change": 0.80 + random.uniform(-0.2, 0.2), "volume": "2100亿"},
-        {"name": "科创50", "value": 980.45 + random.uniform(-5, 5), "change": 2.10 + random.uniform(-0.2, 0.2), "volume": "800亿"},
-    ]
-
-
-def _fetch_market_indices_akshare():
+def _fetch_market_sectors():
     import akshare as ak
-
-    df = ak.stock_zh_index_spot_em()
-    if df is None or df.empty:
-        return []
-
-    records = df.to_dict(orient="records")
-    wanted = {"上证指数", "深证成指", "创业板指", "科创50"}
-    result = []
-    for r in records:
-        name = r.get("指数名称") or r.get("name") or r.get("f14")
-        if name in wanted:
-            value = r.get("最新价") or r.get("close") or r.get("price") or r.get("f2")
-            change = r.get("涨跌幅") or r.get("rate") or r.get("change") or r.get("f3")
-            volume = r.get("成交量") or r.get("volume") or r.get("f5")
-            try:
-                value = float(value)
-            except Exception:
-                value = None
+    try:
+        # 东方财富行业板块
+        df = ak.stock_board_industry_name_em()
+        if df is None or df.empty:
+            return []
+        
+        result = []
+        for _, row in df.iterrows():
+            name = row.get("板块名称")
+            change = row.get("涨跌幅")
             try:
                 change = float(change)
-            except Exception:
-                change = None
-            volume_str = str(volume) if volume is not None else ""
-            result.append({"name": name, "value": value, "change": change, "volume": volume_str})
-    return result
+            except:
+                change = 0.0
+            
+            result.append({"name": name, "change": change})
+            
+        # Sort by name to keep the list stable
+        result.sort(key=lambda x: x['name'])
+        
+        # Return all sectors (sorted by name) to ensure list stability
+        # Users prefer a stable list over a jumping "hot" list
+        return result
 
-
-def _mock_market_sectors():
-    sectors = ["白酒", "新能源车", "半导体", "银行", "房地产", "医药", "人工智能", "光伏", "券商", "中字头"]
-    return [{"name": name, "change": round(random.uniform(-3.0, 3.0), 2)} for name in sectors]
-
-
-def _fetch_market_sectors_akshare():
-    import akshare as ak
-
-    fetcher = getattr(ak, "stock_sector_spot", None) or getattr(ak, "stock_sector_spot_em", None)
-    if not fetcher:
+    except Exception as e:
+        print(f"Error fetching sectors: {e}")
         return []
-
-    data = fetcher()
-    if data is None or data.empty:
-        return []
-
-    records = data.to_dict(orient="records")
-    result = []
-    for r in records[:20]:
-        name = r.get("板块名称") or r.get("name")
-        change = r.get("涨跌幅") or r.get("rate") or r.get("change")
-        try:
-            change = float(change)
-        except Exception:
-            change = round(random.uniform(-3.0, 3.0), 2)
-        result.append({"name": name or "板块", "change": change})
-    return result
 
 @router.get("/macro/calendar", response_model=List[MacroEvent])
 async def get_macro_calendar(
     date: Optional[str] = None,
     countries: Optional[str] = None # comma separated
 ):
-    def _mock_events():
-        return [
-            {
-                "id": 1,
-                "time": "20:30",
-                "country": "US",
-                "currency": "USD",
-                "event": "美国12月季调后非农就业人口(万人)",
-                "importance": "high",
-                "actual": "21.6",
-                "forecast": "17.0",
-                "previous": "17.3",
-                "impact": "利空金银",
-            },
-            {
-                "id": 2,
-                "time": "20:30",
-                "country": "US",
-                "currency": "USD",
-                "event": "美国12月失业率",
-                "importance": "high",
-                "actual": "3.7%",
-                "forecast": "3.8%",
-                "previous": "3.7%",
-                "impact": "中性",
-            },
-            {
-                "id": 3,
-                "time": "22:00",
-                "country": "US",
-                "currency": "USD",
-                "event": "美国12月ISM非制造业PMI",
-                "importance": "medium",
-                "actual": "50.6",
-                "forecast": "52.6",
-                "previous": "52.7",
-                "impact": "利多金银",
-            },
-            {
-                "id": 4,
-                "time": "18:00",
-                "country": "EU",
-                "currency": "EUR",
-                "event": "欧元区12月CPI年率初值",
-                "importance": "high",
-                "actual": "2.9%",
-                "forecast": "3.0%",
-                "previous": "2.4%",
-                "impact": "利多欧元",
-            },
-            {
-                "id": 5,
-                "time": "09:30",
-                "country": "CN",
-                "currency": "CNY",
-                "event": "中国12月CPI年率",
-                "importance": "medium",
-                "actual": "-0.3%",
-                "forecast": "-0.4%",
-                "previous": "-0.5%",
-                "impact": "温和复苏",
-            },
-        ]
-
     def _fetch_events_akshare():
         try:
             import akshare as ak
@@ -310,17 +213,27 @@ async def get_macro_calendar(
             for i, r in enumerate(records[:100]):
                 event_name = r.get("title") or r.get("name") or r.get("event")
                 event_time = r.get("time") or r.get("date") or r.get("datetime") or ""
+                area = r.get("area") or r.get("country") or "CN"
+                
+                # Map area to code if possible, or just keep it
+                country_code = "CN"
+                if "美国" in area: country_code = "US"
+                elif "欧元区" in area: country_code = "EU"
+                elif "日本" in area: country_code = "JP"
+                elif "英国" in area: country_code = "UK"
+                elif "中国" in area: country_code = "CN"
+                
                 events.append(
                     {
                         "id": i + 1,
                         "time": str(event_time)[-5:] if event_time else "",
-                        "country": "CN",
-                        "currency": "CNY",
+                        "country": country_code,
+                        "currency": "",
                         "event": str(event_name) if event_name else "经济事件",
                         "importance": "medium",
-                        "actual": "",
-                        "forecast": "",
-                        "previous": "",
+                        "actual": str(r.get("actual") or ""),
+                        "forecast": str(r.get("forecast") or ""),
+                        "previous": str(r.get("previous") or ""),
                         "impact": "",
                     }
                 )
@@ -336,7 +249,7 @@ async def get_macro_calendar(
         next_refresh = _macro_calendar_cache["next"]
 
     if cached is None:
-        cached = _mock_events()
+        cached = []
 
     if (cached is not None) and (now - ts < 300.0):
         events = cached
@@ -366,19 +279,6 @@ async def get_macro_calendar(
                     asyncio.create_task(_refresh())
 
     result = [dict(e) for e in (events or [])]
-    if date:
-        random.seed(date)
-        for e in result:
-            actual = str(e.get("actual") or "").strip()
-            if not actual:
-                continue
-            has_pct = "%" in actual
-            try:
-                v = float(actual.replace("%", ""))
-            except Exception:
-                continue
-            v = v + random.uniform(-0.5, 0.5)
-            e["actual"] = f"{v:.1f}{'%' if has_pct else ''}"
     if countries:
         country_list = [c.strip() for c in countries.split(",") if c.strip()]
         if country_list:
@@ -391,47 +291,6 @@ async def get_replay_kline(
     period: str = "5", # 5 mins
     count: int = 240
 ):
-    def _mock():
-        base_price = 3000.0
-        data = []
-        start_time = datetime.datetime.now().replace(hour=9, minute=30, second=0, microsecond=0)
-        step = 5
-        try:
-            step = int(period)
-        except Exception:
-            step = 5
-        for i in range(count):
-            change = (random.random() - 0.5) * 10
-            open_price = base_price + (random.random() - 0.5) * 5
-            close_price = open_price + change
-            low_price = min(open_price, close_price) - random.random() * 2
-            high_price = max(open_price, close_price) + random.random() * 2
-            base_price = close_price
-            current_time = start_time + datetime.timedelta(minutes=i * step)
-            data.append(
-                {
-                    "time": current_time.strftime("%H:%M"),
-                    "values": [
-                        round(open_price, 2),
-                        round(close_price, 2),
-                        round(low_price, 2),
-                        round(high_price, 2),
-                    ],
-                    "vol": int(random.random() * 10000),
-                }
-            )
-        closes = [d["values"][1] for d in data]
-        vols = [d["vol"] for d in data]
-        max_price = max(closes)
-        min_price = min(closes)
-        max_vol = max(vols)
-        key_frames = [
-            {"label": "至暗时刻 (Lowest Price)", "index": closes.index(min_price), "value": str(min_price), "type": "min_price"},
-            {"label": "高光时刻 (Highest Price)", "index": closes.index(max_price), "value": str(max_price), "type": "max_price"},
-            {"label": "最大波动 (Max Vol)", "index": vols.index(max_vol), "value": str(max_vol), "type": "max_vol"},
-        ]
-        return {"data": data, "key_frames": key_frames}
-
     def _fetch_akshare():
         try:
             import akshare as ak
@@ -485,7 +344,7 @@ async def get_replay_kline(
         refreshing = cache["refreshing"]
         next_refresh = cache["next"]
 
-    if cached is not None and now - ts < 60.0:
+    if cached is not None:
         return cached
 
     if (not refreshing) and now >= next_refresh:
@@ -512,4 +371,4 @@ async def get_replay_kline(
 
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else _mock()
+    return cached if cached is not None else None

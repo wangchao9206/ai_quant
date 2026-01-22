@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import { Row, Col, Card, Statistic, List, Avatar, Button, Progress, message } from 'antd';
 import { 
     GoldOutlined, 
@@ -20,12 +20,26 @@ const CommoditiesDashboard = () => {
     const [inventory, setInventory] = useState([]);
     const [timeframe, setTimeframe] = useState('1H');
 
+    const refreshLockRef = useRef(false);
+
     useEffect(() => {
         fetchData(timeframe);
+
+        const intervalId = window.setInterval(async () => {
+            if (refreshLockRef.current) return;
+            refreshLockRef.current = true;
+            try {
+                await fetchData(timeframe, { silent: true });
+            } finally {
+                refreshLockRef.current = false;
+            }
+        }, 5000);
+
+        return () => window.clearInterval(intervalId);
     }, [timeframe]);
 
-    const fetchData = async (selectedTimeframe) => {
-        setLoading(true);
+    const fetchData = async (selectedTimeframe, { silent = false } = {}) => {
+        if (!silent) setLoading(true);
         try {
             const [listRes, chartRes, macroRes, alertsRes, inventoryRes] = await Promise.all([
                 axios.get(`${API_BASE_URL}/api/commodities/list`),
@@ -40,10 +54,12 @@ const CommoditiesDashboard = () => {
             setAlerts(alertsRes.data);
             setInventory(inventoryRes.data);
         } catch (error) {
-            console.error("Failed to fetch commodities data:", error);
-            message.error("获取大宗商品数据失败");
+            if (!silent) {
+                console.error("Failed to fetch commodities data:", error);
+                message.error("获取大宗商品数据失败");
+            }
         } finally {
-            setLoading(false);
+            if (!silent) setLoading(false);
         }
     };
 
@@ -52,6 +68,8 @@ const CommoditiesDashboard = () => {
         if (name.includes('Gold') || name.includes('黄金')) return <GoldOutlined style={{ color: '#FFD700' }} />;
         if (name.includes('Silver') || name.includes('白银')) return <div style={{ width: 14, height: 14, background: '#C0C0C0', borderRadius: '50%' }} />;
         if (name.includes('Copper') || name.includes('铜')) return <div style={{ width: 14, height: 14, background: '#B87333', borderRadius: '50%' }} />;
+        if (name.includes('Oil') || name.includes('原油')) return <GlobalOutlined style={{ color: '#cf1322' }} />;
+        if (name.includes('Iron') || name.includes('钢') || name.includes('矿')) return <BankOutlined style={{ color: '#faad14' }} />;
         return <div style={{ width: 14, height: 14, background: '#888', borderRadius: '50%' }} />;
     };
 
@@ -92,6 +110,27 @@ const CommoditiesDashboard = () => {
                     大宗商品与贵金属 (Commodities & Metals)
                 </h1>
                 <p style={{ color: 'rgba(255,255,255,0.45)' }}>全球宏观对冲 • 抗通胀资产管理 • 供应链金融</p>
+            </div>
+
+            <style>{`
+                @keyframes aiqMarqueeCommodities {
+                    0% { transform: translateX(0); }
+                    100% { transform: translateX(-50%); }
+                }
+            `}</style>
+
+            <div className="glass-panel" style={{ marginBottom: '16px', padding: '10px 12px', overflow: 'hidden' }}>
+                <div style={{ display: 'flex', width: '200%', animation: 'aiqMarqueeCommodities 18s linear infinite' }}>
+                    {[0, 1].map((dup) => (
+                        <div key={dup} style={{ display: 'inline-flex', alignItems: 'center', gap: '18px', width: '50%', whiteSpace: 'nowrap' }}>
+                            {metals.map((m) => (
+                                <span key={`c-${dup}-${m.name}`} style={{ color: Number(m.change) >= 0 ? 'var(--color-secondary)' : '#ff4d4f', fontFamily: 'JetBrains Mono' }}>
+                                    {m.name} {Number(m.price).toLocaleString()} {(Number(m.change) > 0 ? '+' : '') + Number(m.change).toFixed(2)}%
+                                </span>
+                            ))}
+                        </div>
+                    ))}
+                </div>
             </div>
 
             <Row gutter={24}>

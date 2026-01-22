@@ -17,6 +17,7 @@ class TrendFollowingStrategy(bt.Strategy):
         ('contract_multiplier', 1), # 合约乘数 (期货使用)
         ('use_expma', False),     # 是否使用指数移动平均 (EXPMA)
         ('print_log', True),      # 是否打印日志
+        ('asset_type', 'futures')
     )
 
     def __init__(self):
@@ -222,6 +223,9 @@ class TrendFollowingStrategy(bt.Strategy):
         # if len(self) % 100 == 0:
         #    self.log(f'Close: {self.datas[0].close[0]:.2f}, SMA10: {self.sma_fast[0]:.2f}, SMA30: {self.sma_slow[0]:.2f}, Cross: {self.crossover[0]}')
 
+        asset_type = self.params.asset_type
+        contract_multiplier = 1 if asset_type == 'stock' else self.params.contract_multiplier
+
         # 1. 没有持仓
         if not self.position:
             # 金叉买入
@@ -235,7 +239,7 @@ class TrendFollowingStrategy(bt.Strategy):
                 # Risk Amount = Size * (Entry - Stop) * Multiplier
                 # Size = Risk Amount / ((Entry - Stop) * Multiplier)
                 risk_amount = value * self.params.risk_per_trade
-                risk_per_unit = stop_dist * self.params.contract_multiplier
+                risk_per_unit = stop_dist * contract_multiplier
                 
                 size = 0
                 if risk_per_unit > 0:
@@ -249,7 +253,7 @@ class TrendFollowingStrategy(bt.Strategy):
                 available_cash = self.broker.get_cash()
                 price = self.datas[0].close[0]
                 # 考虑合约乘数
-                max_affordable = int(available_cash / (price * self.params.contract_multiplier))
+                max_affordable = int(available_cash / (price * contract_multiplier))
                 
                 if size == 0:
                     if max_affordable >= 1:
@@ -270,7 +274,7 @@ class TrendFollowingStrategy(bt.Strategy):
                     self.order = self.buy(size=size)
             
             # 死叉卖空
-            elif self.crossover < 0:
+            elif self.crossover < 0 and asset_type != 'stock':
                 # 计算止损距离
                 atr_value = self.atr[0]
                 stop_dist = atr_value * self.params.atr_multiplier
@@ -279,7 +283,7 @@ class TrendFollowingStrategy(bt.Strategy):
                 # 计算仓位
                 value = self.broker.get_value()
                 risk_amount = value * self.params.risk_per_trade
-                risk_per_unit = stop_dist * self.params.contract_multiplier
+                risk_per_unit = stop_dist * contract_multiplier
                 
                 size = 0
                 if risk_per_unit > 0:
@@ -350,4 +354,3 @@ class TrendFollowingStrategy(bt.Strategy):
                          self.log(f'空单止损触发: 当前价 {self.datas[0].close[0]:.2f} > 止损价 {self.stop_price:.2f}')
                          self.current_trade_exit_reason = f"移动止损触发 (价格 {self.datas[0].close[0]:.2f} > 止损价 {self.stop_price:.2f})"
                          self.order = self.close()
-

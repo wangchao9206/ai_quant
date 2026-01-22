@@ -79,13 +79,13 @@ class GeneratedStrategy(bt.Strategy):
             if self.params.stop_loss > 0:
                 if self.dataclose[0] < self.buyprice * (1.0 - self.params.stop_loss):
                     self.log('STOP LOSS TRIGGERED')
-                    self.order = self.sell()
+                    self.order = self.close()
                     return
             
             if self.params.take_profit > 0:
                 if self.dataclose[0] > self.buyprice * (1.0 + self.params.take_profit):
                     self.log('TAKE PROFIT TRIGGERED')
-                    self.order = self.sell()
+                    self.order = self.close()
                     return
 
         # Entry Conditions
@@ -189,7 +189,7 @@ class GeneratedStrategy(bt.Strategy):
                 elif ("跌破" in segment_lower or "下穿" in segment_lower or "死叉" in segment_lower) and ("卖" in segment_lower or "空" in segment_lower):
                      exit_logic.append(f"            if self.sma{p1}[0] < self.sma{p2}[0] and self.sma{p1}[-1] >= self.sma{p2}[-1]:")
                      exit_logic.append(f"                self.log('MA CROSS SELL')")
-                     exit_logic.append(f"                self.order = self.sell()")
+                     exit_logic.append(f"                self.order = self.close()")
             
             # Single MA (Price vs MA)
             elif len(seg_periods) == 1:
@@ -201,7 +201,7 @@ class GeneratedStrategy(bt.Strategy):
                 elif ("跌破" in segment_lower or "下穿" in segment_lower) and ("卖" in segment_lower):
                      exit_logic.append(f"            if self.dataclose[0] < self.sma{p}[0] and self.dataclose[-1] >= self.sma{p}[-1]:")
                      exit_logic.append(f"                self.log('PRICE DROP MA SELL')")
-                     exit_logic.append(f"                self.order = self.sell()")
+                     exit_logic.append(f"                self.order = self.close()")
 
             # --- RSI Logic ---
             if "rsi" in segment_lower:
@@ -219,7 +219,7 @@ class GeneratedStrategy(bt.Strategy):
                     val = val_match_high.group(1)
                     exit_logic.append(f"            if self.rsi[0] > {val}:")
                     exit_logic.append(f"                self.log('RSI OVERBOUGHT SELL')")
-                    exit_logic.append(f"                self.order = self.sell()")
+                    exit_logic.append(f"                self.order = self.close()")
 
             # --- MACD Logic ---
             if "macd" in segment_lower:
@@ -230,7 +230,7 @@ class GeneratedStrategy(bt.Strategy):
                 elif ("死叉" in segment_lower or ("下穿" in segment_lower and "signal" in segment_lower)) and ("卖" in segment_lower):
                     exit_logic.append(f"            if self.macd.macd[0] < self.macd.signal[0] and self.macd.macd[-1] >= self.macd.signal[-1]:")
                     exit_logic.append(f"                self.log('MACD DEATH CROSS SELL')")
-                    exit_logic.append(f"                self.order = self.sell()")
+                    exit_logic.append(f"                self.order = self.close()")
 
         # Fallback if logic empty (for demo safety)
         if not entry_logic:

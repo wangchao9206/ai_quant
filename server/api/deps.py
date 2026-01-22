@@ -1,13 +1,9 @@
 from typing import Generator
-from core.database import SessionLocal
+from core.database import get_backtest_store
 from core.data_manager import DataManager
 
 def get_db() -> Generator:
-    try:
-        db = SessionLocal()
-        yield db
-    finally:
-        db.close()
+    yield get_backtest_store()
 
 # Singleton instance
 _data_manager = DataManager()

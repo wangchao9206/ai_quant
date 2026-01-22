@@ -1,6 +1,4 @@
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.orm import Session
-from sqlalchemy import desc
 from typing import Optional
 import pandas as pd
 import json
@@ -10,7 +8,7 @@ import importlib
 from pydantic import BaseModel
 
 from api.deps import get_db
-from core.database import BacktestRecord
+from core.database import BacktestStore
 import core.strategy_generator
 
 router = APIRouter()
@@ -22,7 +20,7 @@ class StrategyGenerationRequest(BaseModel):
     text: str
 
 @router.get("/recommended")
-async def get_recommended_strategies(db: Session = Depends(get_db)):
+async def get_recommended_strategies(db: BacktestStore = Depends(get_db)):
     """
     获取推荐策略：
     1. 从历史回测中筛选表现最好的 (Top 3 by Return Rate)
@@ -31,27 +29,24 @@ async def get_recommended_strategies(db: Session = Depends(get_db)):
     recommendations = []
     
     # 1. 查询历史最佳
-    top_records = db.query(BacktestRecord).filter(
-        BacktestRecord.return_rate > 10, # 至少正收益
-        BacktestRecord.total_trades > 5  # 至少有一定交易量
-    ).order_by(desc(BacktestRecord.return_rate)).limit(3).all()
+    top_records = db.top_records(min_return=10, min_trades=5, limit=3)
     
     for record in top_records:
         recommendations.append({
-            "id": f"hist_{record.id}",
-            "name": f"历史优选: {record.symbol} {record.period}策略",
-            "description": f"基于历史回测数据筛选的高收益策略，收益率 {record.return_rate:.2f}%",
+            "id": f"hist_{record.get('id')}",
+            "name": f"历史优选: {record.get('symbol')} {record.get('period')}策略",
+            "description": f"基于历史回测数据筛选的高收益策略，收益率 {float(record.get('return_rate') or 0):.2f}%",
             "tags": ["高收益", "历史验证"],
             "metrics": {
-                "return_rate": record.return_rate,
-                "win_rate": record.win_rate,
-                "max_drawdown": record.max_drawdown,
-                "sharpe_ratio": record.sharpe_ratio
+                "return_rate": record.get("return_rate"),
+                "win_rate": record.get("win_rate"),
+                "max_drawdown": record.get("max_drawdown"),
+                "sharpe_ratio": record.get("sharpe_ratio")
             },
             "config": {
-                "symbol": record.symbol,
-                "period": record.period,
-                "strategy_params": record.strategy_params
+                "symbol": record.get("symbol"),
+                "period": record.get("period"),
+                "strategy_params": record.get("strategy_params")
             },
             "source": "history",
             "usage_guide": "此策略基于历史数据挖掘，建议在相似的市场环境（波动率、趋势性）下使用。请先进行模拟交易验证。",
@@ -152,20 +147,18 @@ async def get_recommended_strategies(db: Session = Depends(get_db)):
 async def get_strategy_correlation(
     ids: Optional[str] = None,
     limit: int = 5,
-    db: Session = Depends(get_db)
+    db: BacktestStore = Depends(get_db)
 ):
-    query = db.query(BacktestRecord)
-    
     selected_records = []
     if ids:
         try:
             id_list = [int(i) for i in ids.split(",")]
-            selected_records = query.filter(BacktestRecord.id.in_(id_list)).all()
+            selected_records = db.get_records_by_ids(id_list)
         except:
             pass
     else:
         # Default to top return strategies
-        selected_records = query.order_by(desc(BacktestRecord.return_rate)).limit(limit).all()
+        selected_records = db.list_history(skip=0, limit=limit, sort_by="return_rate", order="desc", include_big_fields=True).get("items", [])
         
     if not selected_records:
         return {"labels": [], "matrix": []}
@@ -174,14 +167,14 @@ async def get_strategy_correlation(
     data = {}
     for r in selected_records:
         # equity_curve is a list of dicts: [{'date': '2023-01-01', 'value': 100000, 'return': 0.0}, ...]
-        if not r.equity_curve:
+        curve = r.get("equity_curve")
+        if not curve:
             continue
             
         # Parse equity curve
         dates = []
         returns = []
         # Ensure equity_curve is a list (it might be stored as JSON)
-        curve = r.equity_curve
         if isinstance(curve, str):
             try:
                 curve = json.loads(curve)
@@ -199,10 +192,10 @@ async def get_strategy_correlation(
                 dt_index = pd.to_datetime(dates)
                 s = pd.Series(returns, index=dt_index)
                 # Label: ID - Symbol
-                label = f"#{r.id} {r.symbol}"
+                label = f"#{r.get('id')} {r.get('symbol')}"
                 data[label] = s
             except Exception as e:
-                print(f"Error parsing dates for record {r.id}: {e}")
+                print(f"Error parsing dates for record {r.get('id')}: {e}")
                 continue
 
     if not data:
