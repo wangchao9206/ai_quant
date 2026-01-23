@@ -4,12 +4,10 @@ from typing import List, Dict, Optional
 from pydantic import BaseModel
 import asyncio
 import datetime
-import os
 import threading
 import time
-import pandas as pd
 import logging
-from core.tdx_http_client import tdx_http_client
+from core.database import get_market_collection
 
 router = APIRouter()
 logger = logging.getLogger(__name__)
@@ -150,110 +148,59 @@ async def get_market_indices():
     return cached if cached is not None else _fallback_indices()
 
 def _fetch_indices() -> List[Dict]:
-    """Fetch indices with TDX HTTP priority"""
-    # 1. Try TDX HTTP
-    if tdx_http_client.is_available():
-        logger.info("Fetching indices via TDX HTTP")
-        res = _fetch_indices_tdx_http()
-        if res and len(res) >= 4:
-             return res
-        else:
-            logger.warning("TDX HTTP indices incomplete or empty, falling back")
-    
-    # 2. Fallback
-    logger.info("Fetching indices via AkShare fallback")
-    return _fetch_indices_akshare()
-
-def _fetch_indices_tdx_http() -> List[Dict]:
-    """
-    Fetch indices using tdx-api /api/index endpoint.
-    Requires prefixed codes (e.g. SH000001).
-    """
     targets = [
-        ("SH000001", "上证指数"),
-        ("SZ399001", "深证成指"),
-        ("SZ399006", "创业板指"),
-        ("SH000688", "科创50"),
+        ("000001", "上证指数"),
+        ("399001", "深证成指"),
+        ("399006", "创业板指"),
+        ("000688", "科创50"),
     ]
-    results = []
-    
-    for code, name in targets:
-        # Try fetch index bars
-        data = tdx_http_client.get_index_bars(code)
-        if not data:
-            continue
-            
-        snapshot = tdx_http_client.parse_index_snapshot(data, code)
-        if snapshot:
-            # Helper to format volume/amount
-            amt = float(snapshot.get("amount", 0))
-            vol_str = f"{amt/100000000:.2f}亿" if amt > 100000000 else f"{amt:.0f}"
-            
-            results.append({
-                "name": name,
-                "value": snapshot["price"],
-                "change": snapshot["pct_change"],
-                "volume": vol_str
-            })
-            
-    return results
-
-def _fetch_indices_akshare() -> List[Dict]:
-    """Fetch market indices using AkShare (EastMoney)"""
-    logger.info("Starting AkShare indices fetch")
-    import akshare as ak
-    from core.config import DISABLE_PROXIES
     try:
-        if DISABLE_PROXIES:
-            os.environ["NO_PROXY"] = "*"
-            os.environ["no_proxy"] = "*"
-            
-        # target indices codes
-        targets = {
-            "000001": "上证指数",
-            "399001": "深证成指",
-            "399006": "创业板指",
-            "000688": "科创50"
-        }
-        
-        # This API returns all indices, we filter locally
-        # Alternatively, we can use stock_zh_index_spot_em(symbol="...") if supported, but usually it returns a list
-        df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
-        
-        if df is None or df.empty:
-            return []
-            
-        result = []
-        for _, row in df.iterrows():
-            code = str(row.get("代码"))
-            if code in targets:
-                price = row.get("最新价")
-                change_pct = row.get("涨跌幅")
-                vol = row.get("成交额") # Use amount as volume for indices usually better
-                
-                try:
-                    price = float(price)
-                except: price = 0.0
-                
-                try:
-                    change_pct = float(change_pct)
-                except: change_pct = 0.0
-                
-                result.append({
-                    "name": targets[code],
-                    "value": price,
-                    "change": change_pct,
-                    "volume": str(vol)
-                })
-        
-        # Sort
-        order = ['上证指数', '深证成指', '创业板指', '科创50']
-        result.sort(key=lambda x: order.index(x['name']) if x['name'] in order else 99)
-        
-        return result
+        col = get_market_collection()
     except Exception as e:
-        print(f"Error fetching indices from AkShare: {e}")
+        logger.warning("Mongo market collection unavailable: %s", e)
         return []
+
+    results = []
+    for code, name in targets:
+        try:
+            docs = list(
+                col.find(
+                    {"asset_type": "stock", "symbol": code, "period": "daily"},
+                    {"_id": 0, "ts": 1, "close_price": 1, "open_price": 1, "amount": 1, "volume": 1},
+                )
+                .sort("ts", -1)
+                .limit(2)
+            )
+        except Exception:
+            docs = []
+        if not docs:
+            continue
+        latest = docs[0]
+        prev = docs[1] if len(docs) > 1 else docs[0]
+        price = latest.get("close_price") or latest.get("open_price") or 0
+        last_close = prev.get("close_price") or price or 0
+        try:
+            price = float(price)
+        except Exception:
+            price = 0.0
+        try:
+            last_close = float(last_close)
+        except Exception:
+            last_close = price
+        change_pct = ((price - last_close) / last_close * 100) if last_close else 0.0
+        amount = latest.get("amount") or latest.get("volume") or 0
+        try:
+            amount = float(amount)
+        except Exception:
+            amount = 0.0
+        vol_str = f"{amount/100000000:.2f}亿" if amount > 100000000 else f"{amount:.0f}"
+        results.append({
+            "name": name,
+            "value": round(price, 2),
+            "change": round(change_pct, 2),
+            "volume": vol_str,
+        })
+    return results
 
 @router.get("/sectors", response_model=List[SectorInfo])
 async def get_market_sectors():
@@ -298,41 +245,7 @@ async def get_market_sectors():
 
 
 def _fetch_market_sectors():
-    import akshare as ak
-    from core.config import DISABLE_PROXIES
-    try:
-        # 东方财富行业板块
-        # Proxies are globally disabled in main.py, but we ensure it here too
-        if DISABLE_PROXIES:
-            os.environ["NO_PROXY"] = "*"
-            os.environ["no_proxy"] = "*"
-        
-        df = ak.stock_board_industry_name_em()
-        
-        if df is None or df.empty:
-            return []
-        
-        result = []
-        for _, row in df.iterrows():
-            name = row.get("板块名称")
-            change = row.get("涨跌幅")
-            try:
-                change = float(change)
-            except:
-                change = 0.0
-            
-            result.append({"name": name, "change": change})
-            
-        # Sort by name to keep the list stable
-        result.sort(key=lambda x: x['name'])
-        
-        # Return all sectors (sorted by name) to ensure list stability
-        # Users prefer a stable list over a jumping "hot" list
-        return result
-
-    except Exception as e:
-        print(f"Error fetching sectors: {e}")
-        return []
+    return []
 
 @router.get("/macro/calendar", response_model=List[MacroEvent])
 async def get_macro_calendar(
@@ -340,49 +253,6 @@ async def get_macro_calendar(
     countries: Optional[str] = None # comma separated
 ):
     logger.info(f"API Request: /macro/calendar date={date} countries={countries}")
-    def _fetch_events_akshare():
-        try:
-            import akshare as ak
-
-            fetcher = getattr(ak, "news_economic_baidu", None)
-            if not fetcher:
-                return None
-            df = fetcher()
-            if df is None or df.empty:
-                return None
-            records = df.to_dict(orient="records")
-            events = []
-            for i, r in enumerate(records[:100]):
-                event_name = r.get("title") or r.get("name") or r.get("event")
-                event_time = r.get("time") or r.get("date") or r.get("datetime") or ""
-                area = r.get("area") or r.get("country") or "CN"
-                
-                # Map area to code if possible, or just keep it
-                country_code = "CN"
-                if "美国" in area: country_code = "US"
-                elif "欧元区" in area: country_code = "EU"
-                elif "日本" in area: country_code = "JP"
-                elif "英国" in area: country_code = "UK"
-                elif "中国" in area: country_code = "CN"
-                
-                events.append(
-                    {
-                        "id": i + 1,
-                        "time": str(event_time)[-5:] if event_time else "",
-                        "country": country_code,
-                        "currency": "",
-                        "event": str(event_name) if event_name else "经济事件",
-                        "importance": "medium",
-                        "actual": str(r.get("actual") or ""),
-                        "forecast": str(r.get("forecast") or ""),
-                        "previous": str(r.get("previous") or ""),
-                        "impact": "",
-                    }
-                )
-            return events or None
-        except Exception:
-            return None
-
     now = time.monotonic()
     with _cache_lock:
         cached = _macro_calendar_cache["data"]
@@ -397,28 +267,6 @@ async def get_macro_calendar(
         events = cached
     else:
         events = cached
-        if (not refreshing) and now >= next_refresh:
-            with _cache_lock:
-                if (not _macro_calendar_cache["refreshing"]) and time.monotonic() >= _macro_calendar_cache["next"]:
-                    _macro_calendar_cache["refreshing"] = True
-
-                    async def _refresh():
-                        try:
-                            try:
-                                data = await asyncio.wait_for(asyncio.to_thread(_fetch_events_akshare), timeout=6.0)
-                            except Exception:
-                                with _cache_lock:
-                                    _macro_calendar_cache["next"] = time.monotonic() + 60.0
-                                return
-                            if data:
-                                with _cache_lock:
-                                    _macro_calendar_cache["data"] = data
-                                    _macro_calendar_cache["ts"] = time.monotonic()
-                        finally:
-                            with _cache_lock:
-                                _macro_calendar_cache["refreshing"] = False
-
-                    asyncio.create_task(_refresh())
 
     result = [dict(e) for e in (events or [])]
     if countries:
@@ -433,50 +281,6 @@ async def get_replay_kline(
     period: str = "5", # 5 mins
     count: int = 240
 ):
-    def _fetch_akshare():
-        try:
-            import akshare as ak
-
-            df = ak.stock_zh_index_daily_em(symbol=symbol)
-            if df is None or df.empty:
-                return None
-            df = df.tail(count)
-            data = []
-            for _, row in df.iterrows():
-                time_label = row.get("date") or row.get("日期") or row.get("datetime")
-                open_price = row.get("open") or row.get("开盘") or row.get("open_price")
-                close_price = row.get("close") or row.get("收盘") or row.get("close_price")
-                low_price = row.get("low") or row.get("最低") or row.get("low_price")
-                high_price = row.get("high") or row.get("最高") or row.get("high_price")
-                vol = row.get("volume") or row.get("成交量") or 0
-                try:
-                    o = float(open_price)
-                    c = float(close_price)
-                    l = float(low_price)
-                    h = float(high_price)
-                except Exception:
-                    continue
-                try:
-                    v = int(float(vol)) if vol is not None else 0
-                except Exception:
-                    v = 0
-                data.append({"time": str(time_label), "values": [round(o, 2), round(c, 2), round(l, 2), round(h, 2)], "vol": v})
-            if not data:
-                return None
-            closes = [d["values"][1] for d in data]
-            vols = [d["vol"] for d in data]
-            max_price = max(closes)
-            min_price = min(closes)
-            max_vol = max(vols)
-            key_frames = [
-                {"label": "至暗时刻 (Lowest Price)", "index": closes.index(min_price), "value": str(min_price), "type": "min_price"},
-                {"label": "高光时刻 (Highest Price)", "index": closes.index(max_price), "value": str(max_price), "type": "max_price"},
-                {"label": "最大波动 (Max Vol)", "index": vols.index(max_vol), "value": str(max_vol), "type": "max_vol"},
-            ]
-            return {"data": data, "key_frames": key_frames}
-        except Exception:
-            return None
-
     cache_key = f"{symbol}|{period}|{count}"
     now = time.monotonic()
     with _cache_lock:
@@ -488,29 +292,5 @@ async def get_replay_kline(
 
     if cached is not None:
         return cached
-
-    if (not refreshing) and now >= next_refresh:
-        with _cache_lock:
-            cache = _get_cache(_replay_cache, cache_key)
-            if (not cache["refreshing"]) and time.monotonic() >= cache["next"]:
-                cache["refreshing"] = True
-
-                async def _refresh():
-                    try:
-                        try:
-                            data = await asyncio.wait_for(asyncio.to_thread(_fetch_akshare), timeout=8.0)
-                        except Exception:
-                            with _cache_lock:
-                                cache["next"] = time.monotonic() + 30.0
-                            return
-                        if data:
-                            with _cache_lock:
-                                cache["data"] = data
-                                cache["ts"] = time.monotonic()
-                    finally:
-                        with _cache_lock:
-                            cache["refreshing"] = False
-
-                asyncio.create_task(_refresh())
 
     return cached if cached is not None else None

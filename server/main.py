@@ -67,7 +67,6 @@ try:
     from core.engine import BacktestEngine
     from core.optimizer import StrategyOptimizer
     from core.analysis import generate_strategy_summary
-    from core.tdx_client import tdx_client
     print("Core modules imported successfully.")
 except Exception as e:
     print(f"CRITICAL: Failed to import core modules: {e}")
@@ -85,11 +84,10 @@ except Exception as e:
 
 app = FastAPI(debug=True)
 
-from routers import market, analysis, stock, fund, derivatives, commodities, tdx, yidao
+from routers import market, analysis, stock, fund, derivatives, commodities, yidao
 app.include_router(market.router, prefix="/api/market", tags=["Market"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["Analysis"])
 app.include_router(stock.router, prefix="/api/stock", tags=["Stock"])
-app.include_router(tdx.router, prefix="/api/tdx", tags=["TDX"])
 app.include_router(fund.router, prefix="/api/fund", tags=["Fund"])
 app.include_router(derivatives.router, prefix="/api/derivatives", tags=["Derivatives"])
 app.include_router(commodities.router, prefix="/api/commodities", tags=["Commodities"])
@@ -122,7 +120,6 @@ class BacktestRequest(BaseModel):
 HEALTH_STATUS = {
     "startup": {"ok": None, "ts": 0.0, "detail": None},
     "mongo": {"ok": None, "ts": 0.0, "detail": None},
-    "tdx": {"ok": None, "ts": 0.0, "detail": None},
     "akshare": {"ok": None, "ts": 0.0, "detail": None},
 }
 
@@ -146,14 +143,6 @@ async def _check_mongo_health(force: bool = False) -> Optional[bool]:
     _update_health("mongo", ok, detail)
     return ok
 
-async def _check_tdx_health(force: bool = False) -> Optional[bool]:
-    if not force and not _needs_refresh("tdx", 15.0):
-        return HEALTH_STATUS["tdx"]["ok"]
-    ok = await asyncio.to_thread(tdx_client.check_health)
-    detail = tdx_client.get_health().get("detail")
-    _update_health("tdx", ok, detail)
-    return ok
-
 async def _check_akshare_health(force: bool = False) -> Optional[bool]:
     if not force and not _needs_refresh("akshare", 60.0):
         return HEALTH_STATUS["akshare"]["ok"]
@@ -175,19 +164,16 @@ async def _check_akshare_health(force: bool = False) -> Optional[bool]:
 
 def _health_snapshot() -> Dict[str, Any]:
     data = {k: dict(v) for k, v in HEALTH_STATUS.items()}
-    # Removed legacy tdx_client.get_health() call
     return data
 
 async def _run_startup_self_check() -> None:
     await asyncio.gather(
         _check_mongo_health(True),
-        _check_tdx_health(True),
         _check_akshare_health(True),
     )
     data = _health_snapshot()
     ok = all([
         data.get("mongo", {}).get("ok"),
-        data.get("tdx", {}).get("ok"),
         data.get("akshare", {}).get("ok"),
     ])
     _update_health("startup", ok)
@@ -196,13 +182,11 @@ async def _run_startup_self_check() -> None:
 async def get_health():
     await asyncio.gather(
         _check_mongo_health(),
-        _check_tdx_health(),
         _check_akshare_health(),
     )
     data = _health_snapshot()
     ok = all([
         data.get("mongo", {}).get("ok"),
-        data.get("tdx", {}).get("ok"),
         data.get("akshare", {}).get("ok"),
     ])
     _update_health("startup", ok)
@@ -915,9 +899,7 @@ def refresh_symbols_cache():
         # 2. Fetch Stocks (using stock router's helper)
         stocks_list = []
         try:
-            # Re-use the logic from stock router to avoid duplication
-            # Assuming stock router has _fetch_stock_list_tdx
-            stock_data = stock._fetch_stock_list_tdx()
+            stock_data = stock._fetch_stock_list_mongo()
             for s in stock_data:
                 # Add multiplier 1 for stocks
                 stocks_list.append({

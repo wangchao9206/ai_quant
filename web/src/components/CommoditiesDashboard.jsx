@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Row, Col, Card, Statistic, List, Avatar, Button, Progress, message } from 'antd';
+import { Row, Col, Card, Statistic, List, Avatar, Button, Progress, message, Input } from 'antd';
 import { 
     GoldOutlined, 
     BankOutlined, 
@@ -11,6 +11,23 @@ import axios from 'axios';
 import { API_BASE_URL } from '../config';
 import '../styles/design-tokens.css';
 
+const COMMODITY_KEYWORDS = {
+    'Gold (伦敦金)': ['黄金', '沪金', 'au', 'xau'],
+    'Silver (白银)': ['白银', '沪银', 'ag', 'xag'],
+    'Copper (沪铜)': ['沪铜', '铜', 'cu'],
+    'Aluminum (沪铝)': ['沪铝', '铝', 'al'],
+    'Zinc (沪锌)': ['沪锌', '锌', 'zn'],
+    'Crude Oil (原油)': ['原油', 'sc'],
+    'Rebar (螺纹钢)': ['螺纹', '螺纹钢', 'rb'],
+    'Iron Ore (铁矿石)': ['铁矿', '铁矿石', 'i'],
+    'Soymeal (豆粕)': ['豆粕', 'm'],
+    'Palm Oil (棕榈油)': ['棕榈', '棕榈油', 'p'],
+    'Corn (玉米)': ['玉米', 'c'],
+    'Sugar (白糖)': ['白糖', '糖', 'sr'],
+    'Cotton (棉花)': ['棉花', '棉', 'cf'],
+    'Rubber (橡胶)': ['橡胶', 'ru'],
+};
+
 const CommoditiesDashboard = () => {
     const [metals, setMetals] = useState([]);
     const [chartData, setChartData] = useState({ times: [], values: [] });
@@ -19,6 +36,7 @@ const CommoditiesDashboard = () => {
     const [alerts, setAlerts] = useState([]);
     const [inventory, setInventory] = useState([]);
     const [timeframe, setTimeframe] = useState('1H');
+    const [searchText, setSearchText] = useState('');
 
     const refreshLockRef = useRef(false);
 
@@ -102,6 +120,16 @@ const CommoditiesDashboard = () => {
         }]
     };
 
+    const normalizedQuery = String(searchText || '').trim().toLowerCase();
+    const filteredMetals = normalizedQuery
+        ? metals.filter((item) => {
+            const name = String(item.name || '');
+            const keywords = COMMODITY_KEYWORDS[item.name] || [];
+            const candidates = [name, ...keywords];
+            return candidates.some((val) => String(val || '').toLowerCase().includes(normalizedQuery));
+        })
+        : metals;
+
     return (
         <div style={{ padding: '24px', height: '100%', overflowY: 'auto' }}>
             <div style={{ marginBottom: '24px' }}>
@@ -110,6 +138,14 @@ const CommoditiesDashboard = () => {
                     大宗商品与贵金属 (Commodities & Metals)
                 </h1>
                 <p style={{ color: 'rgba(255,255,255,0.45)' }}>全球宏观对冲 • 抗通胀资产管理 • 供应链金融</p>
+                <div style={{ marginTop: '16px', maxWidth: '420px' }}>
+                    <Input.Search
+                        placeholder="搜索品种/中文名/合约缩写"
+                        value={searchText}
+                        onChange={(e) => setSearchText(e.target.value)}
+                        allowClear
+                    />
+                </div>
             </div>
 
             <style>{`
@@ -123,7 +159,7 @@ const CommoditiesDashboard = () => {
                 <div style={{ display: 'flex', width: '200%', animation: 'aiqMarqueeCommodities 18s linear infinite' }}>
                     {[0, 1].map((dup) => (
                         <div key={dup} style={{ display: 'inline-flex', alignItems: 'center', gap: '18px', width: '50%', whiteSpace: 'nowrap' }}>
-                            {metals.map((m) => (
+                            {filteredMetals.map((m) => (
                                 <span key={`c-${dup}-${m.name}`} style={{ color: Number(m.change) >= 0 ? 'var(--color-secondary)' : '#ff4d4f', fontFamily: 'JetBrains Mono' }}>
                                     {m.name} {Number(m.price).toLocaleString()} {(Number(m.change) > 0 ? '+' : '') + Number(m.change).toFixed(2)}%
                                 </span>
@@ -137,7 +173,7 @@ const CommoditiesDashboard = () => {
                 {/* Left: Price Cards */}
                 <Col span={6}>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-                        {metals.map((m, i) => (
+                        {filteredMetals.map((m, i) => (
                             <div key={i} className="glass-card" style={{ padding: '20px', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
                                 <div>
                                     <div style={{ color: '#888', display: 'flex', alignItems: 'center', gap: '8px' }}>

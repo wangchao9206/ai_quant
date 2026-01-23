@@ -6,7 +6,6 @@ import traceback
 import logging
 from contextlib import contextmanager
 from typing import Optional, Iterable
-from core.tdx_http_client import tdx_http_client
 from core.data_processor import DataProcessor
 from core.config import (
     DATA_SYNC_STOCK_SYMBOLS,
@@ -201,102 +200,66 @@ class DataManager:
         return last_ts + datetime.timedelta(days=1)
 
     def load_data(self, symbol, period, start_date=None, end_date=None, asset_type="futures"):
-        filters = ["asset_type=?", "symbol=?", "period=?"]
-        params = [asset_type, symbol, period]
-
+        normalized_symbol = self._normalize_symbol(symbol, asset_type)
+        query = {"asset_type": asset_type, "symbol": normalized_symbol, "period": period}
+        ts_filter = {}
         if start_date:
-            filters.append("ts>=?")
-            params.append(pd.to_datetime(start_date).isoformat())
+            ts_filter["$gte"] = pd.to_datetime(start_date).isoformat()
         if end_date:
             end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1)
-            filters.append("ts<?")
-            params.append(end_dt.isoformat())
+            ts_filter["$lt"] = end_dt.isoformat()
+        if ts_filter:
+            query["ts"] = ts_filter
 
-        where_clause = " AND ".join(filters)
-        sql = (
-            "SELECT ts, open_price, high_price, low_price, close_price, volume, open_interest, amount "
-            f"FROM market_bars WHERE {where_clause} ORDER BY ts ASC"
-        )
+        try:
+            from core.database import get_market_collection
+            col = get_market_collection()
+        except Exception as e:
+            logger.warning("Mongo market collection unavailable: %s", e)
+            return None
 
-        with self._connect() as conn:
-            rows = conn.execute(sql, params).fetchall()
+        try:
+            cursor = col.find(
+                query,
+                {
+                    "_id": 0,
+                    "ts": 1,
+                    "open_price": 1,
+                    "high_price": 1,
+                    "low_price": 1,
+                    "close_price": 1,
+                    "volume": 1,
+                    "open_interest": 1,
+                    "amount": 1,
+                },
+            ).sort("ts", 1)
+            rows = list(cursor)
+        except Exception as e:
+            logger.warning("Mongo market read failed: %s", e)
+            return None
 
         if not rows:
             return None
 
-        df = pd.DataFrame(rows, columns=[
-            "ts",
-            "Open",
-            "High",
-            "Low",
-            "Close",
-            "Volume",
-            "OpenInterest",
-            "Amount",
-        ])
+        df = pd.DataFrame(
+            [
+                {
+                    "ts": r.get("ts"),
+                    "Open": r.get("open_price"),
+                    "High": r.get("high_price"),
+                    "Low": r.get("low_price"),
+                    "Close": r.get("close_price"),
+                    "Volume": r.get("volume"),
+                    "OpenInterest": r.get("open_interest"),
+                    "Amount": r.get("amount"),
+                }
+                for r in rows
+            ]
+        )
         df["ts"] = pd.to_datetime(df["ts"])
         df.set_index("ts", inplace=True)
         df.index.name = "date" if period in {"daily", "weekly"} else "datetime"
         return df
-
-    def _fetch_from_tdx(self, symbol, period_str):
-        """
-        Attempt to fetch kline from TDX (HTTP or Internal).
-        Returns DataFrame with standard columns (Open, High, Low, Close, Volume) and DatetimeIndex,
-        or None if failed.
-        """
-        
-        tdx_period = "day"
-        if period_str == "daily":
-            tdx_period = "day"
-        elif period_str == "weekly":
-            tdx_period = "week"
-        elif str(period_str).isdigit():
-            tdx_period = f"{period_str}min"
-        else:
-            tdx_period = period_str
-
-        data = []
-        if tdx_http_client.is_available():
-            try:
-                data = tdx_http_client.get_kline(symbol, tdx_period)
-            except:
-                pass
-
-        if not data:
-            try:
-                pass
-            except:
-                pass
-                
-        if not data:
-            return None
-            
-        try:
-            df = pd.DataFrame(data)
-            if df.empty:
-                return None
-                
-            rename_map = {
-                'open': 'Open', 'close': 'Close', 'high': 'High', 'low': 'Low', 
-                'vol': 'Volume', 'amount': 'Amount',
-                'datetime': 'date' if period_str in ['daily', 'weekly'] else 'datetime'
-            }
-            
-            if 'open' in df.columns:
-                df.rename(columns=rename_map, inplace=True)
-            
-            idx_col = 'date' if 'date' in df.columns else 'datetime'
-            if idx_col in df.columns:
-                df[idx_col] = pd.to_datetime(df[idx_col])
-                df.set_index(idx_col, inplace=True)
-            else:
-                return None
-                
-            return df
-        except Exception as e:
-            print(f"Error processing TDX data: {e}")
-            return None
 
     def _format_date(self, value: Optional[datetime.datetime]) -> Optional[str]:
         if value is None:
@@ -311,10 +274,6 @@ class DataManager:
     def _fetch_stock_data(self, symbol: str, period: str, start_date: Optional[datetime.datetime]) -> Optional[pd.DataFrame]:
         try:
             if period in {"daily", "weekly"}:
-                df = self._fetch_from_tdx(symbol, period)
-                if df is not None:
-                    return df
-
                 import akshare as ak
                 start_arg = self._format_date(start_date)
                 try:
@@ -337,10 +296,6 @@ class DataManager:
                 }, inplace=True)
                 df["date"] = pd.to_datetime(df["date"])
                 df.set_index("date", inplace=True)
-                return df
-
-            df = self._fetch_from_tdx(symbol, period)
-            if df is not None:
                 return df
 
             import akshare as ak
@@ -508,50 +463,7 @@ class DataManager:
             return 0
 
     def _write_market_data(self, df: pd.DataFrame, asset_type: str, symbol: str, period: str) -> int:
-        if df is None or df.empty:
-            return 0
-        update_time = datetime.datetime.now(datetime.UTC).isoformat()
-        rows = []
-        for ts, row in df.iterrows():
-            rows.append(
-                (
-                    asset_type,
-                    symbol,
-                    period,
-                    pd.to_datetime(ts).isoformat(),
-                    row.get("Open"),
-                    row.get("High"),
-                    row.get("Low"),
-                    row.get("Close"),
-                    row.get("Volume"),
-                    row.get("OpenInterest"),
-                    row.get("Amount"),
-                    update_time,
-                )
-            )
-
-        with self._connect() as conn:
-            conn.executemany(
-                """
-                INSERT INTO market_bars(
-                    asset_type, symbol, period, ts, open_price, high_price, low_price, close_price,
-                    volume, open_interest, amount, update_time
-                ) VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(asset_type, symbol, period, ts)
-                DO UPDATE SET
-                    open_price=excluded.open_price,
-                    high_price=excluded.high_price,
-                    low_price=excluded.low_price,
-                    close_price=excluded.close_price,
-                    volume=excluded.volume,
-                    open_interest=excluded.open_interest,
-                    amount=excluded.amount,
-                    update_time=excluded.update_time
-                """,
-                rows,
-            )
-        self._write_market_data_mongo(df, asset_type, symbol, period)
-        return len(rows)
+        return self._write_market_data_mongo(df, asset_type, symbol, period)
 
     def sync_symbol_data(self, symbol: str, period: str, asset_type: str, full: bool = False) -> bool:
         start_time = datetime.datetime.now(datetime.UTC)

@@ -6,8 +6,7 @@ import {
     RiseOutlined, 
     FallOutlined,
     HeatMapOutlined,
-    AlertOutlined,
-    ThunderboltOutlined
+    AlertOutlined
 } from '@ant-design/icons';
 import ReactECharts from 'echarts-for-react';
 import axios from 'axios';
@@ -21,7 +20,6 @@ const StockDashboard = () => {
     const [period, setPeriod] = useState('day');
     const [searchText, setSearchText] = useState('600519');
     const [loading, setLoading] = useState(false);
-    const [tdxReady, setTdxReady] = useState(false);
     
     const [marketIndices, setMarketIndices] = useState([]);
     const [stockQuote, setStockQuote] = useState(null);
@@ -56,198 +54,32 @@ const StockDashboard = () => {
         return Number.isFinite(n) ? n : null;
     };
 
-    const mapTdxQuoteToUi = (data, code) => {
-        const root = data && data.data != null ? data.data : data;
-        const rec = Array.isArray(root) ? root[0] : root;
-        if (!rec || typeof rec !== 'object') return null;
-
-        const name = pick(rec, ['name', '名称', 'stock_name', '证券名称']) || code;
-        const price = toNumber(pick(rec, ['price', 'last', '最新价', '最新', 'close', '现价'])) ?? 0;
-        const open = toNumber(pick(rec, ['open', '今开', '开盘'])) ?? price;
-        const high = toNumber(pick(rec, ['high', '最高'])) ?? price;
-        const low = toNumber(pick(rec, ['low', '最低'])) ?? price;
-        const changePct = toNumber(pick(rec, ['change', 'change_pct', '涨跌幅', '涨幅', 'pct'])) ?? 0;
-        const changeAmt = toNumber(pick(rec, ['changeAmt', 'change_amt', '涨跌额', '涨跌', 'diff'])) ?? 0;
-        const vol = pick(rec, ['vol', 'volume', '成交量']) ?? '-';
-        const amt = pick(rec, ['amt', 'amount', '成交额']) ?? '-';
-        const pe = toNumber(pick(rec, ['pe', '市盈率-动态'])) ?? 0;
-        const pb = toNumber(pick(rec, ['pb', '市净率'])) ?? 0;
-
-        const uiCode = pick(rec, ['code', '证券代码', 'stock_code']) || code;
-
-        return {
-            name: String(name),
-            code: String(uiCode),
-            price,
-            change: changePct,
-            changeAmt,
-            open,
-            high,
-            low,
-            vol: String(vol),
-            amt: String(amt),
-            pe,
-            pb,
-        };
+    const fetchQuoteOnly = async (code) => {
+        const quoteRes = await axios.get(`${API_BASE_URL}/api/stock/quote`, { params: { symbol: code } });
+        return quoteRes.data;
     };
 
-    const mapTdxOrderbookToUi = (data) => {
-        const root = data && data.data != null ? data.data : data;
-        const rec = Array.isArray(root) ? root[0] : root;
-        if (!rec || typeof rec !== 'object') return null;
-
-        const rawAsks = pick(rec, ['asks', 'sell', '卖盘', '卖五档']);
-        const rawBids = pick(rec, ['bids', 'buy', '买盘', '买五档']);
-
-        const mapSide = (side) => {
-            if (!side) return [];
-            if (Array.isArray(side)) {
-                if (side.length > 0 && typeof side[0] === 'object' && side[0] != null) {
-                    return side
-                        .map((x) => {
-                            const p = toNumber(pick(x, ['p', 'price', '价', 'Price', 'P']));
-                            const v = toNumber(pick(x, ['v', 'vol', 'volume', '量', 'Volume', 'V']));
-                            if (p == null) return null;
-                            return { p, v: v == null ? 0 : Math.trunc(v) };
-                        })
-                        .filter(Boolean);
-                }
-
-                if (side.length > 0 && Array.isArray(side[0])) {
-                    return side
-                        .map((x) => {
-                            const p = toNumber(x[0]);
-                            const v = toNumber(x[1]);
-                            if (p == null) return null;
-                            return { p, v: v == null ? 0 : Math.trunc(v) };
-                        })
-                        .filter(Boolean);
-                }
-            }
-            return [];
-        };
-
-        const asks = mapSide(rawAsks);
-        const bids = mapSide(rawBids);
-        return asks.length || bids.length ? { asks, bids } : null;
+    const fetchOrderbookOnly = async (code) => {
+        const orderBookRes = await axios.get(`${API_BASE_URL}/api/stock/orderbook`, { params: { symbol: code } });
+        return orderBookRes.data;
     };
 
-    const mapTdxKlineToUi = (data) => {
-        const root = data && data.data != null ? data.data : data;
-        const rows = Array.isArray(root) ? root : Array.isArray(root?.list) ? root.list : [];
-        if (!rows.length) return null;
-
-        const times = [];
-        const values = [];
-        for (const r of rows) {
-            if (!r) continue;
-            const t = pick(r, ['datetime', 'time', 'date', 'datetime', '日期', '时间']);
-            const o = toNumber(pick(r, ['open', '开盘']));
-            const c = toNumber(pick(r, ['close', '收盘']));
-            const l = toNumber(pick(r, ['low', '最低']));
-            const h = toNumber(pick(r, ['high', '最高']));
-            if (t == null || o == null || c == null || l == null || h == null) continue;
-            times.push(String(t));
-            values.push([o, c, l, h]);
-        }
-        return times.length ? { times, values } : null;
-    };
-
-    const fetchFromTdx = async (code, periodArg = 'day') => {
-        const [quoteRes, klineRes] = await Promise.all([
-            axios.get(`${API_BASE_URL}/api/tdx/quote`, { params: { code } }),
-            axios.get(`${API_BASE_URL}/api/tdx/kline`, { params: { code, type: periodArg } }),
-        ]);
-
-        const quote = mapTdxQuoteToUi(quoteRes.data, code);
-        const orderBook = mapTdxOrderbookToUi(quoteRes.data) || { asks: [], bids: [] };
-        const kline = mapTdxKlineToUi(klineRes.data) || { times: [], values: [] };
-
-        if (!quote) {
-            throw new Error('invalid quote');
-        }
-
-        return { quote, orderBook, kline };
-    };
-
-    const fetchQuoteOnlyFromTdx = async (code) => {
-        const quoteRes = await axios.get(`${API_BASE_URL}/api/tdx/quote`, { params: { code } });
-        const quote = mapTdxQuoteToUi(quoteRes.data, code);
-        const orderBook = mapTdxOrderbookToUi(quoteRes.data) || { asks: [], bids: [] };
-        if (!quote) throw new Error('invalid quote');
-        return { quote, orderBook };
-    };
-
-    const fetchKlineOnlyFromTdx = async (code, periodArg = 'day') => {
-        const klineRes = await axios.get(`${API_BASE_URL}/api/tdx/kline`, { params: { code, type: periodArg } });
-        return mapTdxKlineToUi(klineRes.data) || { times: [], values: [] };
-    };
-
-    const fetchBatchQuotesFromTdx = async (codes) => {
-        const clean = (codes || []).map(normalizeCode).filter((c) => /^\d{6}$/.test(c));
-        if (!clean.length) return [];
-
-        const tryParse = (payload) => {
-            const root = payload && payload.data != null ? payload.data : payload;
-            const rows = Array.isArray(root) ? root : Array.isArray(root?.list) ? root.list : [];
-            const mapped = rows
-                .map((r) => {
-                    const c = normalizeCode(pick(r || {}, ['code', '证券代码', 'stock_code']) || '');
-                    const ui = mapTdxQuoteToUi(r, c);
-                    return ui;
-                })
-                .filter(Boolean);
-            return mapped;
-        };
-
-        try {
-            const res = await axios.get(`${API_BASE_URL}/api/tdx/batch-quote`, { params: { codes: clean.join(',') } });
-            const parsed = tryParse(res.data);
-            if (parsed.length) return parsed;
-        } catch {
-        }
-
-        try {
-            const res = await axios.get(`${API_BASE_URL}/api/tdx/batch-quote`, { params: { code: clean } });
-            const parsed = tryParse(res.data);
-            if (parsed.length) return parsed;
-        } catch {
-        }
-
-        const rows = [];
-        for (const c of clean.slice(0, 12)) {
-            try {
-                const res = await axios.get(`${API_BASE_URL}/api/tdx/quote`, { params: { code: c } });
-                const ui = mapTdxQuoteToUi(res.data, c);
-                if (ui) rows.push(ui);
-            } catch {
-            }
-        }
-        return rows;
+    const fetchIntradayOnly = async (code) => {
+        const intradayRes = await axios.get(`${API_BASE_URL}/api/stock/intraday`, { params: { symbol: code } });
+        return intradayRes.data;
     };
 
     const refreshWatchlist = async () => {
         try {
-            const quotes = await fetchBatchQuotesFromTdx(watchlist);
-            if (quotes.length) {
-                const byCode = new Map(quotes.map((q) => [normalizeCode(q.code), q]));
-                const ordered = watchlist
-                    .map((c) => byCode.get(normalizeCode(c)))
-                    .filter(Boolean);
-                setWatchQuotes(ordered);
-            }
+            const clean = (watchlist || []).map(normalizeCode).filter((c) => /^\d{6}$/.test(c));
+            if (!clean.length) return;
+            const results = await Promise.allSettled(clean.map((c) => fetchQuoteOnly(c)));
+            const quotes = results.filter((r) => r.status === 'fulfilled').map((r) => r.value);
+            if (!quotes.length) return;
+            const byCode = new Map(quotes.map((q) => [normalizeCode(q.code), q]));
+            const ordered = clean.map((c) => byCode.get(normalizeCode(c))).filter(Boolean);
+            setWatchQuotes(ordered);
         } catch {
-        }
-    };
-
-    const fetchTdxHealth = async () => {
-        try {
-            await axios.get(`${API_BASE_URL}/api/tdx/health`, { timeout: 1500 });
-            setTdxReady(true);
-            return true;
-        } catch {
-            setTdxReady(false);
-            return false;
         }
     };
 
@@ -257,8 +89,7 @@ const StockDashboard = () => {
 
     useEffect(() => {
         (async () => {
-            const healthy = await fetchTdxHealth();
-            fetchAllData(healthy);
+            fetchAllData();
         })();
     }, [symbol, period]);
 
@@ -280,32 +111,15 @@ const StockDashboard = () => {
                 }
 
                 let quoteFetched = false;
-                if (tdxReady) {
-                    try {
-                        const { quote, orderBook } = await fetchQuoteOnlyFromTdx(code);
-                        setStockQuote(quote);
-                        setOrderBook(orderBook);
-                        setTdxReady(true);
-                        quoteFetched = true;
-                    } catch {
-                        setTdxReady(false);
-                    }
-                } else {
-                    // Try to recover TDX occasionally (approx every 15s)
-                    // Removed random check for deterministic behavior
-                    if (Date.now() % 15000 < 3000) {
-                        fetchTdxHealth();
-                    }
-                }
-
                 if (!quoteFetched) {
                     try {
-                        const [quoteRes, orderBookRes] = await Promise.all([
-                            axios.get(`${API_BASE_URL}/api/stock/quote`, { params: { symbol: code } }),
-                            axios.get(`${API_BASE_URL}/api/stock/orderbook`, { params: { symbol: code } }),
+                        const [quote, orderBook] = await Promise.all([
+                            fetchQuoteOnly(code),
+                            fetchOrderbookOnly(code),
                         ]);
-                        setStockQuote(quoteRes.data);
-                        setOrderBook(orderBookRes.data);
+                        setStockQuote(quote);
+                        setOrderBook(orderBook);
+                        quoteFetched = true;
                     } catch {
                     }
                 }
@@ -313,28 +127,22 @@ const StockDashboard = () => {
                 const now = Date.now();
                 if (now - lastKlineAtRef.current >= 20000) {
                     lastKlineAtRef.current = now;
-                    if (tdxReady) {
-                        try {
-                            const kline = await fetchKlineOnlyFromTdx(code, period);
-                            setKlineData(kline);
-                        } catch {
-                            // If kline fails, we might not want to kill tdxReady immediately unless strict
-                        }
+                    try {
+                        const kline = await fetchIntradayOnly(code);
+                        setKlineData(kline);
+                    } catch {
                     }
                 }
-
-                if (tdxReady) {
-                    refreshWatchlist();
-                }
+                refreshWatchlist();
             } finally {
                 realtimeLockRef.current = false;
             }
         }, 3000);
 
         return () => window.clearInterval(intervalId);
-    }, [symbol, watchlist, tdxReady, period]);
+    }, [symbol, watchlist, period]);
 
-    const fetchAllData = async (isTdxAvailable = false) => {
+    const fetchAllData = async () => {
         setLoading(true);
         try {
             // 并行请求所有数据
@@ -347,34 +155,15 @@ const StockDashboard = () => {
             setMarketIndices(indicesRes.data);
             setSectorData(sectorsRes.data);
 
-            let tdxSuccess = false;
-            if (isTdxAvailable) {
-                try {
-                    const { quote, orderBook, kline } = await fetchFromTdx(code, period);
-                    setStockQuote(quote);
-                    setOrderBook(orderBook);
-                    setKlineData(kline);
-                    setTdxReady(true);
-                    tdxSuccess = true;
-                } catch (e) {
-                    setTdxReady(false);
-                }
-            }
-
-            if (!tdxSuccess) {
-                const [quoteRes, orderBookRes, intradayRes] = await Promise.all([
-                    axios.get(`${API_BASE_URL}/api/stock/quote`, { params: { symbol: code } }),
-                    axios.get(`${API_BASE_URL}/api/stock/orderbook`, { params: { symbol: code } }),
-                    axios.get(`${API_BASE_URL}/api/stock/intraday`, { params: { symbol: code } })
-                ]);
-                setStockQuote(quoteRes.data);
-                setOrderBook(orderBookRes.data);
-                setKlineData(intradayRes.data);
-            }
-
-            if (tdxSuccess) {
-                refreshWatchlist();
-            }
+            const [quote, orderBook, intraday] = await Promise.all([
+                fetchQuoteOnly(code),
+                fetchOrderbookOnly(code),
+                fetchIntradayOnly(code)
+            ]);
+            setStockQuote(quote);
+            setOrderBook(orderBook);
+            setKlineData(intraday);
+            refreshWatchlist();
         } catch (error) {
             console.error("Failed to fetch stock data:", error);
             message.error(t('stock.fetch_error'));
@@ -425,19 +214,6 @@ const StockDashboard = () => {
                 console.warn("Stock search failed", e);
             }
 
-            for (const params of candidates) {
-                const res = await axios.get(`${API_BASE_URL}/api/tdx/search`, { params });
-                const root = res.data && res.data.data != null ? res.data.data : res.data;
-                const rows = Array.isArray(root) ? root : Array.isArray(root?.list) ? root.list : [];
-                const first = rows[0];
-                const hitCode = first && (first.code || first.代码 || first.stock_code || first.证券代码);
-                const normalized = normalizeCode(hitCode || '');
-                if (/^\d{6}$/.test(normalized)) {
-                    setSymbol(normalized);
-                    setSearchText(normalized);
-                    return;
-                }
-            }
         } catch {
         }
 

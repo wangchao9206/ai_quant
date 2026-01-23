@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
-import { Row, Col, Card, Statistic, Table, Tag, Tabs, Button, Space, Typography, message } from 'antd';
+import { Row, Col, Card, Statistic, Table, Tag, Tabs, Button, Space, Typography, message, Input } from 'antd';
 import { 
     ThunderboltOutlined, 
     FallOutlined, 
@@ -21,6 +21,7 @@ const DerivativesDashboard = () => {
     const [optionsData, setOptionsData] = useState([]);
     const [loading, setLoading] = useState(false);
     const [summary, setSummary] = useState({ basis: 0, vix: 0, signal: '-' });
+    const [searchText, setSearchText] = useState('');
 
     const refreshLockRef = useRef(false);
 
@@ -145,6 +146,20 @@ const DerivativesDashboard = () => {
         }]
     };
 
+    const normalizedQuery = String(searchText || '').trim().toLowerCase();
+    const filteredFutures = normalizedQuery
+        ? futuresData.filter((item) => {
+            const candidates = [item.symbol, item.name, item.price, item.change, item.basis, item.volume, item.openInt];
+            return candidates.some((val) => String(val || '').toLowerCase().includes(normalizedQuery));
+        })
+        : futuresData;
+    const filteredOptions = normalizedQuery
+        ? optionsData.filter((item) => {
+            const candidates = [item.strike, item.callPrice, item.callVol, item.putPrice, item.putVol];
+            return candidates.some((val) => String(val || '').toLowerCase().includes(normalizedQuery));
+        })
+        : optionsData;
+
     return (
         <div className="derivatives-container" style={{ padding: '24px', height: '100%', overflowY: 'auto' }}>
             <div className="header-section" style={{ marginBottom: '24px' }}>
@@ -153,6 +168,14 @@ const DerivativesDashboard = () => {
                     衍生品交易台 (Derivatives Desk)
                 </Title>
                 <Text style={{ color: 'rgba(255,255,255,0.45)' }}>高频期货交易 • 期权波动率策略 • 风险对冲中心</Text>
+                <div style={{ marginTop: '12px', maxWidth: '420px' }}>
+                    <Input.Search
+                        placeholder="搜索合约/名称/价格/基差"
+                        value={searchText}
+                        onChange={(e) => setSearchText(e.target.value)}
+                        allowClear
+                    />
+                </div>
             </div>
 
             <style>{`
@@ -166,7 +189,7 @@ const DerivativesDashboard = () => {
                 <div style={{ display: 'flex', width: '200%', animation: 'aiqMarqueeDerivatives 18s linear infinite' }}>
                     {[0, 1].map((dup) => (
                         <div key={dup} style={{ display: 'inline-flex', alignItems: 'center', gap: '18px', width: '50%', whiteSpace: 'nowrap' }}>
-                            {futuresData.slice(0, 12).map((f) => (
+                            {filteredFutures.slice(0, 12).map((f) => (
                                 <span key={`f-${dup}-${f.symbol}`} style={{ color: Number(f.change) >= 0 ? 'var(--color-secondary)' : '#ff4d4f', fontFamily: 'JetBrains Mono' }}>
                                     {f.symbol} {Number(f.price).toFixed(1)} {(Number(f.change) > 0 ? '+' : '') + Number(f.change).toFixed(1)}%
                                 </span>
@@ -223,7 +246,7 @@ const DerivativesDashboard = () => {
                             <div className="glass-card" style={{ padding: '0' }}>
                                 <Table 
                                     columns={futuresColumns} 
-                                    dataSource={futuresData} 
+                                    dataSource={filteredFutures} 
                                     pagination={false} 
                                     rowClassName="glass-row"
                                 />
@@ -242,7 +265,7 @@ const DerivativesDashboard = () => {
                                         </div>
                                         <Table 
                                             columns={tQuoteColumns} 
-                                            dataSource={optionsData} 
+                                            dataSource={filteredOptions} 
                                             pagination={false} 
                                             size="small"
                                             rowClassName="glass-row"

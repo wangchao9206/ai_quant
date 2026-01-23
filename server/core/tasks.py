@@ -18,9 +18,12 @@ def daily_data_update(full: bool = False):
 
 def startup_sync_check():
     data_manager = get_data_manager()
-    with data_manager._connect() as conn:
-        row = conn.execute("SELECT COUNT(1) FROM market_bars").fetchone()
-        total = int(row[0]) if row else 0
+    try:
+        from core.database import get_market_collection
+        col = get_market_collection()
+        total = int(col.count_documents({}))
+    except Exception:
+        total = 0
     if total == 0:
         logger.info("No historical data found, starting full sync")
         return daily_data_update(full=True)

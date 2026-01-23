@@ -1,5 +1,3 @@
-from typing import List, Dict, Optional
-
 # === MongoDB Configuration ===
 MONGO_HOST = "localhost"
 MONGO_PORT = "27017"
@@ -26,17 +24,3 @@ DATA_SYNC_FUTURES_LIMIT = 0
 # === Proxy Configuration ===
 # Explicitly disable proxies to prevent connection issues
 DISABLE_PROXIES = True
-
-# === TDX Server Configuration ===
-# Initial high-quality hosts
-TDX_HOSTS: List[Dict[str, object]] = [
-    {'ip': '119.147.212.81', 'port': 7709},
-    {'ip': '119.147.212.120', 'port': 7709},
-    {'ip': '221.231.141.60', 'port': 7709},
-    {'ip': '124.74.236.94', 'port': 7709},
-    {'ip': '101.227.73.20', 'port': 7709},
-    {'ip': '114.80.73.243', 'port': 7709},
-    {'ip': '121.14.110.200', 'port': 7709},
-    {'ip': '218.108.47.69', 'port': 7709},
-    {'ip': '180.153.39.51', 'port': 7709},
-]

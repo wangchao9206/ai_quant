@@ -14,6 +14,14 @@ const FundDashboard = () => {
     const [fundsData, setFundsData] = useState([]);
     const [loading, setLoading] = useState(false);
 
+    const normalizedQuery = String(searchText || '').trim().toLowerCase();
+    const filteredFunds = normalizedQuery
+        ? fundsData.filter((item) => {
+            const candidates = [item.code, item.name, item.manager, item.type];
+            return candidates.some((val) => String(val || '').toLowerCase().includes(normalizedQuery));
+        })
+        : fundsData;
+
     useEffect(() => {
         fetchFunds();
     }, []);
@@ -136,12 +144,13 @@ const FundDashboard = () => {
                 <Text style={{ color: 'rgba(255,255,255,0.45)' }}>{t('fund.subtitle')}</Text>
                 
                 <div style={{ marginTop: '24px', maxWidth: '800px' }}>
-                    <Input 
+                    <Input.Search 
                         size="large" 
                         placeholder={t('fund.search_placeholder')} 
                         prefix={<SearchOutlined style={{ color: 'var(--color-primary)' }} />} 
                         value={searchText}
                         onChange={e => setSearchText(e.target.value)}
+                        allowClear
                         style={{ 
                             background: 'rgba(0,0,0,0.3)', 
                             border: '1px solid var(--color-primary)', 
@@ -208,7 +217,7 @@ const FundDashboard = () => {
                     <div className="glass-table-container">
                         <Table 
                             columns={columns} 
-                            dataSource={fundsData} 
+                            dataSource={filteredFunds} 
                             pagination={false}
                             rowClassName="glass-row"
                             style={{ background: 'transparent' }}

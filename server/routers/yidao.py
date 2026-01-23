@@ -1,6 +1,6 @@
 from fastapi import APIRouter
 from core.yijing import YiJingEngine
-from core.tdx_client import tdx_client
+from core.database import get_market_collection
 import datetime
 import random
 
@@ -161,6 +161,39 @@ def _rotation_reason(change: float, preferred: bool, trend: str):
         return "资金撤退迹象"
     return "中性震荡"
 
+def _fetch_index_snapshot(code: str = "000001"):
+    try:
+        col = get_market_collection()
+    except Exception:
+        return 0.0, 0.0
+    try:
+        docs = list(
+            col.find(
+                {"asset_type": "stock", "symbol": code, "period": "daily"},
+                {"_id": 0, "ts": 1, "close_price": 1, "open_price": 1},
+            )
+            .sort("ts", -1)
+            .limit(2)
+        )
+    except Exception:
+        return 0.0, 0.0
+    if not docs:
+        return 0.0, 0.0
+    latest = docs[0]
+    prev = docs[1] if len(docs) > 1 else docs[0]
+    price = latest.get("close_price") or latest.get("open_price") or 0.0
+    last_close = prev.get("close_price") or prev.get("open_price") or 0.0
+    try:
+        price = float(price)
+    except Exception:
+        price = 0.0
+    try:
+        last_close = float(last_close)
+    except Exception:
+        last_close = 0.0
+    change_pct = ((price - last_close) / last_close * 100) if last_close else 0.0
+    return price, change_pct
+
 def _season_cycle(now: datetime.datetime):
     month = now.month
     if month in (3, 4, 5):
@@ -192,13 +225,7 @@ async def get_forecast():
     seed_source = "market"
     
     try:
-        # Use get_index_quotes which handles connection and market codes
-        indices = tdx_client.get_index_quotes()
-        sh_index = next((i for i in indices if i['name'] == '上证指数'), None)
-        
-        if sh_index:
-            seed = sh_index.get('value', 0)
-            change_pct = sh_index.get('change', 0)
+        seed, change_pct = _fetch_index_snapshot("000001")
     except Exception as e:
         print(f"YiDao Seed Error: {e}")
         pass
@@ -303,17 +330,12 @@ async def get_wisdom():
 async def get_rotation():
     now = datetime.datetime.now()
     seed = int(now.strftime("%Y%m%d"))
-    indices = []
     change_pct = 0.0
     trend = "震荡"
     try:
-        indices = tdx_client.get_index_quotes()
+        _, change_pct = _fetch_index_snapshot("000001")
     except Exception:
-        indices = []
-    if indices:
-        sh_index = next((i for i in indices if i.get("name") == "上证指数"), None)
-        if sh_index:
-            change_pct = sh_index.get("change", 0) or 0.0
+        change_pct = 0.0
     factor = int(float(change_pct) * 10) if change_pct is not None else 0
     forecast = engine.get_forecast(seed, abs(factor))
     trend = forecast.get("hexagram", {}).get("trend", "震荡")

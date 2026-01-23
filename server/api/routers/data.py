@@ -32,16 +32,6 @@ async def get_data_quality(
     """
     df = data_manager.load_data(symbol, period, start_date, end_date)
     if df is None or df.empty:
-        # Try fetch if not exists
-        df = data_manager.fetch_and_update(symbol, period)
-        if df is not None:
-             # Apply date filter again
-             if start_date: df = df[df.index >= pd.to_datetime(start_date)]
-             if end_date: 
-                 end_dt = pd.to_datetime(end_date) + pd.Timedelta(days=1)
-                 df = df[df.index < end_dt]
-                 
-    if df is None or df.empty:
          raise HTTPException(status_code=404, detail="No data available")
          
     return DataProcessor.assess_quality(df)
@@ -56,8 +46,7 @@ async def get_kline_data(
 ):
     print(f"Fetching kline data for {symbol} {period} {start_date}-{end_date}")
     
-    # Use DataManager with fallback
-    df = data_manager.get_data_with_fallback(symbol, period, start_date, end_date)
+    df = data_manager.load_data(symbol, period, start_date, end_date)
     
     if df is None or df.empty:
         print(f"No data found for {symbol} {period}")
