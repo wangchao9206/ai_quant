@@ -2,44 +2,82 @@ import pandas as pd
 import numpy as np
 
 class DataProcessor:
-    """
-    数据预处理与质量评估模块
-    负责数据清洗、转换、标准化和质量监控
-    """
-    
+    DEFAULT_RULES = {
+        "required_columns": ["Open", "High", "Low", "Close"],
+        "numeric_columns": ["Open", "High", "Low", "Close", "Volume", "OpenInterest", "Amount"],
+        "min_values": {
+            "Open": 0,
+            "High": 0,
+            "Low": 0,
+            "Close": 0,
+            "Volume": 0,
+            "OpenInterest": 0,
+            "Amount": 0,
+        },
+        "interpolate": True,
+        "fill_methods": ["bfill", "ffill"],
+        "clip_ohlc": True,
+    }
+
     @staticmethod
-    def clean_data(df: pd.DataFrame) -> pd.DataFrame:
-        """
-        自动化数据清洗流程
-        1. 处理缺失值 (插值)
-        2. 去除重复索引
-        3. 处理异常值 (简单的 winsorization 或 裁剪)
-        """
+    def clean_data(df: pd.DataFrame, rules: dict | None = None) -> pd.DataFrame:
         if df is None or df.empty:
             return df
-            
+
+        rule_set = dict(DataProcessor.DEFAULT_RULES)
+        if rules:
+            rule_set.update(rules)
+
         df_clean = df.copy()
-        
-        # 1. 去除重复索引
-        df_clean = df_clean[~df_clean.index.duplicated(keep='last')]
-        
-        # 2. 处理缺失值 (线性插值，对于金融时间序列比较合理)
-        df_clean.interpolate(method='linear', inplace=True)
-        # 如果开头结尾有NaN，使用bfill/ffill
-        df_clean.fillna(method='bfill', inplace=True)
-        df_clean.fillna(method='ffill', inplace=True)
-        
-        # 3. 简单的异常值处理 (针对价格，不做过度处理以免失真，主要针对 volume < 0 等逻辑错误)
-        if 'Volume' in df_clean.columns:
-            df_clean.loc[df_clean['Volume'] < 0, 'Volume'] = 0
-            
-        # 针对 OHLC 的逻辑检查: High 必须 >= Low
-        if 'High' in df_clean.columns and 'Low' in df_clean.columns:
-             # 修复 High < Low 的情况 (交换)
-             mask = df_clean['High'] < df_clean['Low']
-             if mask.any():
-                 df_clean.loc[mask, ['High', 'Low']] = df_clean.loc[mask, ['Low', 'High']].values
-        
+
+        if not isinstance(df_clean.index, pd.DatetimeIndex):
+            try:
+                df_clean.index = pd.to_datetime(df_clean.index)
+            except Exception:
+                return df_clean.iloc[0:0]
+
+        required_columns = rule_set.get("required_columns") or []
+        for col in required_columns:
+            if col not in df_clean.columns:
+                return df_clean.iloc[0:0]
+
+        df_clean = df_clean[~df_clean.index.duplicated(keep="last")]
+
+        numeric_columns = rule_set.get("numeric_columns") or []
+        for col in numeric_columns:
+            if col in df_clean.columns:
+                df_clean[col] = pd.to_numeric(df_clean[col], errors="coerce")
+
+        if rule_set.get("interpolate"):
+            df_clean = df_clean.infer_objects(copy=False)
+            df_clean = df_clean.interpolate(method="linear")
+
+        for method in rule_set.get("fill_methods") or []:
+            if method == "ffill":
+                df_clean = df_clean.ffill()
+            elif method == "bfill":
+                df_clean = df_clean.bfill()
+            else:
+                df_clean = df_clean.fillna(method=method)
+
+        min_values = rule_set.get("min_values") or {}
+        for col, min_val in min_values.items():
+            if col in df_clean.columns and min_val is not None:
+                df_clean.loc[df_clean[col] < min_val, col] = min_val
+
+        if "High" in df_clean.columns and "Low" in df_clean.columns:
+            mask = df_clean["High"] < df_clean["Low"]
+            if mask.any():
+                df_clean.loc[mask, ["High", "Low"]] = df_clean.loc[mask, ["Low", "High"]].values
+
+        if rule_set.get("clip_ohlc") and "High" in df_clean.columns and "Low" in df_clean.columns:
+            for col in ("Open", "Close"):
+                if col in df_clean.columns:
+                    df_clean[col] = df_clean[col].clip(lower=df_clean["Low"], upper=df_clean["High"])
+
+        if required_columns:
+            df_clean = df_clean.dropna(subset=required_columns)
+
         return df_clean
 
     @staticmethod

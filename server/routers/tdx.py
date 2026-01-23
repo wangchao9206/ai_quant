@@ -1,32 +1,56 @@
 from fastapi import APIRouter, HTTPException, Query
 from typing import List, Optional, Dict, Any
-from core.tdx_client import tdx_client
+from core.tdx_http_client import tdx_http_client
+import asyncio
+import logging
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
 
 @router.get("/health")
 async def tdx_health():
-    """Check connection to TDX servers"""
-    if tdx_client.connect():
-        return {"status": "ok", "msg": "TDX Connected"}
+    """
+    Health check for market data services.
+    Prioritizes tdx-api (HTTP), falls back to AkShare.
+    """
+    logger.info("Health check requested")
+    status_info = {
+        "status": "ok",
+        "tdx_api": "unknown",
+        "internal_client": "disabled",
+        "timestamp": 0
+    }
+    
+    # 1. Check tdx-api (HTTP)
+    if tdx_http_client.is_available():
+        status_info["tdx_api"] = "available"
+        status_info["msg"] = "TDX API (HTTP) is active"
+        logger.info("Health check: TDX API available")
     else:
-        # Don't fail hard, just report status, but frontend expects 200 for 'health' usually?
-        # Frontend code: await axios.get(..., { timeout: 1500 });
-        # If it throws, tdxReady=false.
-        # So we can return 503 or 500 if not connected.
-        raise HTTPException(status_code=503, detail="TDX Connection Failed")
+        status_info["tdx_api"] = "unavailable"
+        status_info["msg"] = "Using AkShare fallback"
+        logger.warning("Health check: TDX API unavailable")
+        
+    return status_info
 
 @router.get("/quote")
 async def get_quote(code: str):
     """Get real-time quote for a single stock"""
-    try:
-        quotes = tdx_client.get_quotes([code])
-        if not quotes:
-            raise HTTPException(status_code=404, detail="Quote not found")
-        return quotes[0]
-    except Exception as e:
-        print(f"Error fetching quote for {code}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    logger.info(f"TDX Quote request for {code}")
+    # 1. Try Local TDX HTTP API
+    if tdx_http_client.is_available():
+        try:
+            data = await asyncio.to_thread(tdx_http_client.get_quote, code)
+            if data:
+                return data
+        except Exception as e:
+            logger.error(f"TDX HTTP quote error for {code}: {e}")
+            pass
+
+    # 2. Internal client (Disabled)
+    logger.warning(f"Quote not found for {code} (Internal client disabled)")
+    raise HTTPException(status_code=404, detail="Quote not found")
 
 @router.get("/batch-quote")
 async def get_batch_quote(codes: Optional[str] = None, code: Optional[List[str]] = Query(None)):
@@ -44,21 +68,45 @@ async def get_batch_quote(codes: Optional[str] = None, code: Optional[List[str]]
     if not target_codes:
         return []
 
-    try:
-        return tdx_client.get_quotes(target_codes)
-    except Exception as e:
-        print(f"Batch quote error: {e}")
-        # Return empty list on error for batch to allow partial UI rendering if possible, 
-        # but usually empty list means no data.
-        return []
+    logger.info(f"TDX Batch Quote request for {len(target_codes)} codes")
+    
+    results = []
+    # 1. Try Local TDX HTTP API
+    if tdx_http_client.is_available():
+        # tdx-api might not have batch endpoint yet, iterate for now or check impl
+        # Assuming we just loop for now or client supports it?
+        # tdx_http_client doesn't have batch method in the file I read.
+        # We'll just loop concurrently.
+        async def fetch_one(c):
+            try:
+                return await asyncio.to_thread(tdx_http_client.get_quote, c)
+            except:
+                return None
+        
+        tasks = [fetch_one(c) for c in target_codes]
+        results = await asyncio.gather(*tasks)
+        results = [r for r in results if r]
+        
+        if results:
+            return results
+
+    return []
 
 @router.get("/kline")
 async def get_kline(code: str, type: str = 'day'):
     """Get K-line data"""
-    try:
-        # Default to day if type is not provided or recognized by client
-        bars = tdx_client.get_kline(code, type)
-        return bars
-    except Exception as e:
-        print(f"Error fetching kline for {code}: {e}")
-        raise HTTPException(status_code=500, detail=str(e))
+    logger.info(f"TDX Kline request for {code} type={type}")
+    # 1. Try Local TDX HTTP API First
+    if tdx_http_client.is_available():
+        try:
+            # tdx_http_client.get_kline returns processed list or empty list
+            bars = await asyncio.to_thread(tdx_http_client.get_kline, code, type)
+            if bars:
+                return bars
+        except Exception as e:
+            logger.error(f"TDX HTTP kline fallback error: {e}")
+            pass
+
+    # 2. Fallback to Internal TDX Client
+    logger.warning(f"Kline not found for {code} (Internal client disabled)")
+    return []

@@ -33,6 +33,32 @@ class FundItem(BaseModel):
     sharpe: float
     maxdd: float
 
+def _fallback_fund_list() -> List[dict]:
+    return [
+        {
+            "key": "1",
+            "code": "000001",
+            "name": "示例基金A",
+            "manager": "-",
+            "type": "Stock",
+            "nav": "0.0000",
+            "return1y": 0.0,
+            "sharpe": 0.0,
+            "maxdd": 0.0,
+        },
+        {
+            "key": "2",
+            "code": "000002",
+            "name": "示例基金B",
+            "manager": "-",
+            "type": "Hybrid",
+            "nav": "0.0000",
+            "return1y": 0.0,
+            "sharpe": 0.0,
+            "maxdd": 0.0,
+        },
+    ]
+
 @router.get("/list", response_model=List[FundItem])
 async def get_fund_list():
     """
@@ -65,13 +91,16 @@ async def get_fund_list():
                             with _fund_list_lock:
                                 _fund_list_cache["data"] = data
                                 _fund_list_cache["ts"] = time.monotonic()
+                        else:
+                            with _fund_list_lock:
+                                _fund_list_cache["next"] = time.monotonic() + 60.0
                     finally:
                         with _fund_list_lock:
                             _fund_list_cache["refreshing"] = False
 
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else []
+    return cached if cached is not None else _fallback_fund_list()
 
 
 def _fetch_fund_list_akshare():

@@ -1,60 +1,28 @@
 import datetime
+import logging
 from api.deps import get_data_manager
-from core.constants import get_multiplier
+from core.config import DATA_SYNC_ASSET_TYPES
 
-# Lazy import akshare to avoid startup delay
-ak = None
+logger = logging.getLogger(__name__)
 
-def daily_data_update():
-    global ak
-    if ak is None:
-        import akshare as ak
-        
-    print(f"[{datetime.datetime.now()}] Starting daily data update...")
+
+def daily_data_update(full: bool = False):
     data_manager = get_data_manager()
-    
-    # Update cached symbols first to get latest list
-    symbols = []
-    try:
-        print("Fetching latest symbol list from AkShare...")
-        df = ak.futures_display_main_sina()
-        
-        # Update symbol cache file
-        futures_list = []
-        for _, row in df.iterrows():
-            s = row['symbol']
-            multiplier = get_multiplier(s)
-            futures_list.append({
-                "code": s,
-                "name": f"{row['name']} ({s})",
-                "multiplier": multiplier
-            })
-        
-        data_manager.save_symbols_list(futures_list)
-        symbols = [item['code'] for item in futures_list]
-        print(f"Successfully updated symbol list with {len(symbols)} items.")
-        
-    except Exception as e:
-        print(f"Failed to fetch symbol list during update: {e}")
-        # Fallback to existing local cache or defaults
-        local_symbols = data_manager.get_symbols_list()
-        if local_symbols:
-            symbols = [s['code'] for s in local_symbols]
-        else:
-            symbols = ['LH0', 'SH0', 'RB0', 'M0', 'IF0']
-    
-    print(f"Found {len(symbols)} symbols to update.")
-    for symbol in symbols:
-        # Update daily data for all symbols
-        # Note: Updating minute data for ALL symbols might be too heavy. 
-        # Ideally, we only update symbols that are 'active' or 'watched'.
-        # For now, we update daily data which is fast.
-        try:
-            data_manager.fetch_and_update(symbol, 'daily')
-        except Exception as e:
-            print(f"Error updating data for {symbol}: {e}")
-        
-        # Uncomment to update minute data too (warning: slow)
-        # data_manager.fetch_and_update(symbol, '5') 
-        
-    print(f"[{datetime.datetime.now()}] Daily data update completed.")
+    start_time = datetime.datetime.utcnow()
+    logger.info("Daily data sync started")
+    summaries = data_manager.sync_all(asset_types=DATA_SYNC_ASSET_TYPES, period="daily", full=full)
+    duration = (datetime.datetime.utcnow() - start_time).total_seconds()
+    logger.info("Daily data sync finished in %.2fs", duration)
+    return summaries
+
+
+def startup_sync_check():
+    data_manager = get_data_manager()
+    with data_manager._connect() as conn:
+        row = conn.execute("SELECT COUNT(1) FROM market_bars").fetchone()
+        total = int(row[0]) if row else 0
+    if total == 0:
+        logger.info("No historical data found, starting full sync")
+        return daily_data_update(full=True)
+    logger.info("Historical data found, starting incremental sync")
+    return daily_data_update(full=False)

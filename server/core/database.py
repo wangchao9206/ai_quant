@@ -1,12 +1,20 @@
 from __future__ import annotations
 
 import datetime as _dt
+import atexit
 import json
 import os
 import sqlite3
 from dataclasses import dataclass
 from typing import Any, Dict, Iterable, List, Optional, Tuple, Union
 from urllib.parse import quote_plus
+
+# Import configuration from config.py
+from core.config import (
+    MONGO_HOST, MONGO_PORT, MONGO_USERNAME, MONGO_PASSWORD,
+    MONGO_AUTH_SOURCE, MONGO_DB, MONGO_COLLECTION, MONGO_MARKET_COLLECTION,
+    MONGO_MIGRATE_FROM_SQLITE, MONGO_USE_FALLBACK, MONGO_TIMEOUT_MS
+)
 
 try:
     from bson import ObjectId
@@ -100,31 +108,22 @@ class MongoConfig:
     migrate_from_sqlite: bool
 
 
+MONGITA_PATH = os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "storage", "mongita")
+
+
 def _build_mongo_uri() -> str:
-    uri = os.getenv("MONGODB_URI")
-    if uri:
-        return uri
-
-    host = os.getenv("MONGODB_HOST", "localhost")
-    port = os.getenv("MONGODB_PORT", "27017")
-
-    username = os.getenv("MONGODB_USERNAME") or os.getenv("MONGODB_USER")
-    password = os.getenv("MONGODB_PASSWORD") or os.getenv("MONGODB_PASS")
-    if username and password:
-        auth_source = os.getenv("MONGODB_AUTH_SOURCE", "admin")
-        return (
-            f"mongodb://{quote_plus(username)}:{quote_plus(password)}@{host}:{port}/"
-            f"?authSource={quote_plus(auth_source)}"
-        )
-
-    return f"mongodb://{host}:{port}"
+    query = f"authSource={quote_plus(MONGO_AUTH_SOURCE)}"
+    return (
+        f"mongodb://{quote_plus(MONGO_USERNAME)}:{quote_plus(MONGO_PASSWORD)}@{MONGO_HOST}:{MONGO_PORT}/"
+        f"?{query}"
+    )
 
 
 def get_mongo_config() -> MongoConfig:
     uri = _build_mongo_uri()
-    database = os.getenv("MONGODB_DB", "quant")
-    collection = os.getenv("MONGODB_COLLECTION", "backtest_records")
-    migrate_from_sqlite = os.getenv("MONGODB_MIGRATE_FROM_SQLITE", "1") not in {"0", "false", "False"}
+    database = MONGO_DB
+    collection = MONGO_COLLECTION
+    migrate_from_sqlite = MONGO_MIGRATE_FROM_SQLITE
     return MongoConfig(uri=uri, database=database, collection=collection, migrate_from_sqlite=migrate_from_sqlite)
 
 
@@ -132,33 +131,49 @@ _mongo_client: Optional["MongoClient"] = None
 _mongo_db: Optional["Database"] = None
 _backtest_col: Optional["Collection"] = None
 _counters_col: Optional["Collection"] = None
+_market_col: Optional["Collection"] = None
+
+
+def close_mongo() -> None:
+    global _mongo_client, _mongo_db, _backtest_col, _counters_col, _market_col
+    client = _mongo_client
+    _mongo_client = None
+    _mongo_db = None
+    _backtest_col = None
+    _counters_col = None
+    _market_col = None
+    if client is not None:
+        close_fn = getattr(client, "close", None)
+        if callable(close_fn):
+            close_fn()
+
+
+atexit.register(close_mongo)
 
 
 def init_mongo() -> None:
-    global _mongo_client, _mongo_db, _backtest_col, _counters_col
+    global _mongo_client, _mongo_db, _backtest_col, _counters_col, _market_col
 
     if MongoClient is None:
         raise RuntimeError("pymongo is not installed")
 
     cfg = get_mongo_config()
 
-    use_fallback = os.getenv("MONGODB_FALLBACK_MONGITA", "1") not in {"0", "false", "False"}
-    timeout_ms = int(os.getenv("MONGODB_SERVER_SELECTION_TIMEOUT_MS", "2000"))
+    use_fallback = MONGO_USE_FALLBACK
+    timeout_ms = int(MONGO_TIMEOUT_MS)
 
     def _switch_to_mongita() -> None:
         nonlocal cfg
         if MongitaClientDisk is None:
             raise RuntimeError("mongita is not installed")
-        base_dir = os.getenv(
-            "MONGITA_PATH",
-            os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "storage", "mongita"),
-        )
+        base_dir = MONGITA_PATH
         os.makedirs(base_dir, exist_ok=True)
         client = MongitaClientDisk(base_dir)
         globals()["_mongo_client"] = client
         globals()["_mongo_db"] = client[cfg.database]
         globals()["_backtest_col"] = globals()["_mongo_db"][cfg.collection]
         globals()["_counters_col"] = globals()["_mongo_db"]["counters"]
+        globals()["_market_col"] = globals()["_mongo_db"][MONGO_MARKET_COLLECTION]
     try:
         _mongo_client = MongoClient(cfg.uri, serverSelectionTimeoutMS=timeout_ms)
         _mongo_client.admin.command("ping")
@@ -174,13 +189,13 @@ def init_mongo() -> None:
 
     except Exception as e:
         # Check if user explicitly provided credentials
-        has_credentials = os.getenv("MONGODB_URI") or (os.getenv("MONGODB_USERNAME") and os.getenv("MONGODB_PASSWORD"))
+        has_credentials = True
         
         if OperationFailure is not None and isinstance(e, OperationFailure):
             # If credentials were explicitly provided but failed, raise error
             if has_credentials:
                 raise RuntimeError(
-                    "Mongo authentication failed with provided credentials. Please check MONGODB_USERNAME/MONGODB_PASSWORD."
+                    "Mongo authentication failed with hardcoded credentials."
                 ) from e
             # If no credentials provided but auth required, we will try fallback below
             # (unless fallback is disabled)
@@ -190,8 +205,7 @@ def init_mongo() -> None:
             # If we can't fall back, and it was an auth error (or other error), re-raise
             if OperationFailure is not None and isinstance(e, OperationFailure) and not has_credentials:
                  raise RuntimeError(
-                    "Mongo authentication failed and fallback is disabled/unavailable. "
-                    "Set MONGODB_USERNAME/MONGODB_PASSWORD or enable Mongita."
+                    "Mongo authentication failed and fallback is disabled/unavailable."
                 ) from e
             raise
             
@@ -201,6 +215,7 @@ def init_mongo() -> None:
     _mongo_db = _mongo_client[cfg.database]
     _backtest_col = _mongo_db[cfg.collection]
     _counters_col = _mongo_db["counters"]
+    _market_col = _mongo_db[MONGO_MARKET_COLLECTION]
 
     for args, kwargs in (
         (("legacy_id",), {"unique": True, "sparse": True}),
@@ -211,6 +226,16 @@ def init_mongo() -> None:
     ):
         try:
             _backtest_col.create_index(*args, **kwargs)
+        except Exception:
+            pass
+
+    for args, kwargs in (
+        (([("asset_type", 1), ("symbol", 1), ("period", 1), ("ts", 1)],), {"unique": True}),
+        (("symbol",), {}),
+        (("ts",), {}),
+    ):
+        try:
+            _market_col.create_index(*args, **kwargs)
         except Exception:
             pass
 
@@ -251,6 +276,14 @@ def get_counters_collection() -> "Collection":
     if _counters_col is None:
         raise RuntimeError("Mongo counters collection is not initialized")
     return _counters_col
+
+
+def get_market_collection() -> "Collection":
+    if _market_col is None:
+        init_mongo()
+    if _market_col is None:
+        raise RuntimeError("Mongo market collection is not initialized")
+    return _market_col
 
 
 def _next_sequence(name: str) -> int:
@@ -595,5 +628,75 @@ def migrate_sqlite_to_mongo_if_needed(sqlite_path: str) -> None:
 
         if max_id > 0:
             _set_sequence_min("backtest_records", max_id)
+    finally:
+        conn.close()
+
+
+def migrate_market_sqlite_to_mongo(sqlite_path: str, batch_size: int = 1000) -> Dict[str, Any]:
+    if not os.path.exists(sqlite_path):
+        return {"status": "missing", "total": 0, "migrated": 0}
+
+    col = get_market_collection()
+    try:
+        from pymongo import UpdateOne
+    except Exception as e:
+        raise RuntimeError(f"pymongo unavailable: {e}") from e
+
+    conn = sqlite3.connect(sqlite_path)
+    conn.row_factory = sqlite3.Row
+    try:
+        cur = conn.execute("SELECT name FROM sqlite_master WHERE type='table' AND name='market_bars'")
+        if cur.fetchone() is None:
+            return {"status": "no_table", "total": 0, "migrated": 0}
+
+        total = int(conn.execute("SELECT COUNT(1) FROM market_bars").fetchone()[0])
+        migrated = 0
+        offset = 0
+        while True:
+            rows = conn.execute(
+                """
+                SELECT asset_type, symbol, period, ts, open_price, high_price, low_price,
+                       close_price, volume, open_interest, amount, update_time
+                FROM market_bars
+                ORDER BY ts ASC
+                LIMIT ? OFFSET ?
+                """,
+                (int(batch_size), int(offset)),
+            ).fetchall()
+            if not rows:
+                break
+
+            ops = []
+            for r in rows:
+                row = dict(r)
+                key = {
+                    "asset_type": row.get("asset_type"),
+                    "symbol": row.get("symbol"),
+                    "period": row.get("period"),
+                    "ts": row.get("ts"),
+                }
+                doc = {
+                    "asset_type": row.get("asset_type"),
+                    "symbol": row.get("symbol"),
+                    "period": row.get("period"),
+                    "ts": row.get("ts"),
+                    "open_price": row.get("open_price"),
+                    "high_price": row.get("high_price"),
+                    "low_price": row.get("low_price"),
+                    "close_price": row.get("close_price"),
+                    "volume": row.get("volume"),
+                    "open_interest": row.get("open_interest"),
+                    "amount": row.get("amount"),
+                    "update_time": row.get("update_time"),
+                }
+                ops.append(UpdateOne(key, {"$set": doc}, upsert=True))
+
+            if ops:
+                col.bulk_write(ops, ordered=False)
+                migrated += len(ops)
+
+            offset += int(batch_size)
+
+        return {"status": "ok", "total": total, "migrated": migrated}
     finally:
         conn.close()

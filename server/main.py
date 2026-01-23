@@ -1,6 +1,30 @@
 import sys
 import os
 import traceback
+import logging
+from core.config import DISABLE_PROXIES
+
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[logging.StreamHandler(sys.stdout)]
+)
+logger = logging.getLogger("main")
+
+# FORCE DISABLE PROXY GLOBALLY if configured
+# The user reports persistent ProxyError issues.
+# We explicitly set NO_PROXY to '*' to bypass any system/registry proxies.
+# We also clear HTTP_PROXY/HTTPS_PROXY to ensure no env var interference.
+if DISABLE_PROXIES:
+    os.environ["NO_PROXY"] = "*"
+    os.environ["no_proxy"] = "*"
+    if "HTTP_PROXY" in os.environ: del os.environ["HTTP_PROXY"]
+    if "HTTPS_PROXY" in os.environ: del os.environ["HTTPS_PROXY"]
+    if "http_proxy" in os.environ: del os.environ["http_proxy"]
+    if "https_proxy" in os.environ: del os.environ["https_proxy"]
+    if "ALL_PROXY" in os.environ: del os.environ["ALL_PROXY"]
+    if "all_proxy" in os.environ: del os.environ["all_proxy"]
 
 print(f"Loading main.py... name={__name__}")
 
@@ -12,6 +36,8 @@ try:
     from apscheduler.schedulers.background import BackgroundScheduler
     from pydantic import BaseModel
     from typing import Optional, Dict, Any, List
+    import asyncio
+    import time
     import uvicorn
     import json
     import io
@@ -34,11 +60,14 @@ try:
     # import akshare as ak # Removed to avoid startup blocking
     import datetime
     from core.constants import get_multiplier
+    from core.config import DATA_SYNC_CRON_HOUR, DATA_SYNC_CRON_MINUTE
     from core.database import BacktestStore, init_mongo, get_backtest_store
     from core.data_manager import data_manager
+    from core.tasks import daily_data_update, startup_sync_check
     from core.engine import BacktestEngine
     from core.optimizer import StrategyOptimizer
     from core.analysis import generate_strategy_summary
+    from core.tdx_client import tdx_client
     print("Core modules imported successfully.")
 except Exception as e:
     print(f"CRITICAL: Failed to import core modules: {e}")
@@ -56,8 +85,7 @@ except Exception as e:
 
 app = FastAPI(debug=True)
 
-# 注册新的路由
-from routers import market, analysis, stock, fund, derivatives, commodities, tdx
+from routers import market, analysis, stock, fund, derivatives, commodities, tdx, yidao
 app.include_router(market.router, prefix="/api/market", tags=["Market"])
 app.include_router(analysis.router, prefix="/api/analysis", tags=["Analysis"])
 app.include_router(stock.router, prefix="/api/stock", tags=["Stock"])
@@ -65,6 +93,7 @@ app.include_router(tdx.router, prefix="/api/tdx", tags=["TDX"])
 app.include_router(fund.router, prefix="/api/fund", tags=["Fund"])
 app.include_router(derivatives.router, prefix="/api/derivatives", tags=["Derivatives"])
 app.include_router(commodities.router, prefix="/api/commodities", tags=["Commodities"])
+app.include_router(yidao.router, prefix="/api/yidao", tags=["YiDao"])
 
 # 数据库依赖
 def get_db():
@@ -89,6 +118,95 @@ class BacktestRequest(BaseModel):
     initial_cash: float = 1000000.0 # 初始本金
     strategy_code: Optional[str] = None # 自定义策略代码
     asset_type: Optional[str] = None
+
+HEALTH_STATUS = {
+    "startup": {"ok": None, "ts": 0.0, "detail": None},
+    "mongo": {"ok": None, "ts": 0.0, "detail": None},
+    "tdx": {"ok": None, "ts": 0.0, "detail": None},
+    "akshare": {"ok": None, "ts": 0.0, "detail": None},
+}
+
+def _update_health(name: str, ok: bool, detail: Optional[str] = None) -> None:
+    HEALTH_STATUS[name] = {"ok": ok, "ts": time.time(), "detail": detail}
+
+def _needs_refresh(name: str, ttl: float) -> bool:
+    ts = (HEALTH_STATUS.get(name, {}) or {}).get("ts") or 0.0
+    return time.time() - ts > ttl
+
+async def _check_mongo_health(force: bool = False) -> Optional[bool]:
+    if not force and not _needs_refresh("mongo", 30.0):
+        return HEALTH_STATUS["mongo"]["ok"]
+    def _work():
+        try:
+            get_backtest_store()
+            return True, None
+        except Exception as e:
+            return False, str(e)
+    ok, detail = await asyncio.to_thread(_work)
+    _update_health("mongo", ok, detail)
+    return ok
+
+async def _check_tdx_health(force: bool = False) -> Optional[bool]:
+    if not force and not _needs_refresh("tdx", 15.0):
+        return HEALTH_STATUS["tdx"]["ok"]
+    ok = await asyncio.to_thread(tdx_client.check_health)
+    detail = tdx_client.get_health().get("detail")
+    _update_health("tdx", ok, detail)
+    return ok
+
+async def _check_akshare_health(force: bool = False) -> Optional[bool]:
+    if not force and not _needs_refresh("akshare", 60.0):
+        return HEALTH_STATUS["akshare"]["ok"]
+    def _work():
+        try:
+            import akshare as ak
+            df = ak.stock_zh_index_spot_em()
+            if df is None or df.empty:
+                return False, "empty"
+            return True, None
+        except Exception as e:
+            return False, str(e)
+    try:
+        ok, detail = await asyncio.wait_for(asyncio.to_thread(_work), timeout=4.0)
+    except Exception as e:
+        ok, detail = False, str(e)
+    _update_health("akshare", ok, detail)
+    return ok
+
+def _health_snapshot() -> Dict[str, Any]:
+    data = {k: dict(v) for k, v in HEALTH_STATUS.items()}
+    # Removed legacy tdx_client.get_health() call
+    return data
+
+async def _run_startup_self_check() -> None:
+    await asyncio.gather(
+        _check_mongo_health(True),
+        _check_tdx_health(True),
+        _check_akshare_health(True),
+    )
+    data = _health_snapshot()
+    ok = all([
+        data.get("mongo", {}).get("ok"),
+        data.get("tdx", {}).get("ok"),
+        data.get("akshare", {}).get("ok"),
+    ])
+    _update_health("startup", ok)
+
+@app.get("/api/health")
+async def get_health():
+    await asyncio.gather(
+        _check_mongo_health(),
+        _check_tdx_health(),
+        _check_akshare_health(),
+    )
+    data = _health_snapshot()
+    ok = all([
+        data.get("mongo", {}).get("ok"),
+        data.get("tdx", {}).get("ok"),
+        data.get("akshare", {}).get("ok"),
+    ])
+    _update_health("startup", ok)
+    return _health_snapshot()
 
 @app.get("/api/strategies/recommended")
 async def get_recommended_strategies(db: BacktestStore = Depends(get_db)):
@@ -355,7 +473,6 @@ async def run_backtest(request: BacktestRequest, db: BacktestStore = Depends(get
     return response_data
 
 from core.data_processor import DataProcessor
-import time
 
 # ... (Previous imports)
 
@@ -826,18 +943,30 @@ def refresh_symbols_cache():
         SYMBOLS_REFRESHING = False
 
 @app.get("/api/symbols")
-async def get_symbols(background_tasks: BackgroundTasks):
+async def get_symbols():
+    logger.info("API Request: /api/symbols")
     global CACHED_SYMBOLS, LAST_CACHE_TIME, SYMBOLS_REFRESHING, SYMBOLS_NEXT_REFRESH
     
     # 1. 内存缓存 (1小时失效)
     if CACHED_SYMBOLS and CACHED_SYMBOLS.get("futures") and LAST_CACHE_TIME:
         if (datetime.datetime.now() - LAST_CACHE_TIME).total_seconds() < 3600:
+            logger.info("Returning cached symbols (memory)")
             return CACHED_SYMBOLS
             
     # 2. 本地文件缓存 (持久化)
-    local_symbols = data_manager.get_symbols_list()
+    logger.info("Checking local symbols cache...")
+    local_symbols = None
+    try:
+        local_symbols = await asyncio.wait_for(
+            asyncio.to_thread(data_manager.get_symbols_list),
+            timeout=1.0, # Increased from 0.5s to 1.0s to be safe on Windows
+        )
+    except Exception as e:
+        logger.warning(f"Local symbol cache read timeout/error: {e}")
+        local_symbols = None
+    
     if local_symbols and isinstance(local_symbols, dict) and (local_symbols.get("futures") or local_symbols.get("stocks")):
-        print("从本地缓存加载品种列表")
+        logger.info("Loaded symbols from local cache")
         CACHED_SYMBOLS = local_symbols
         LAST_CACHE_TIME = datetime.datetime.now()
         return CACHED_SYMBOLS
@@ -845,9 +974,16 @@ async def get_symbols(background_tasks: BackgroundTasks):
     # 3. 网络获取 (如果本地没有)
     now = time.monotonic()
     if (not SYMBOLS_REFRESHING) and now >= SYMBOLS_NEXT_REFRESH:
+        logger.info("Triggering background symbol refresh")
         SYMBOLS_REFRESHING = True
-        background_tasks.add_task(refresh_symbols_cache)
+        async def _bg_refresh():
+            try:
+                await asyncio.wait_for(asyncio.to_thread(refresh_symbols_cache), timeout=10.0)
+            except Exception as e:
+                logger.error(f"Background symbol refresh failed: {e}")
+        asyncio.create_task(_bg_refresh())
 
+    logger.info("Returning fallback/default symbols")
     # Return default/fallback if cache empty
     return CACHED_SYMBOLS if (CACHED_SYMBOLS.get("futures") or CACHED_SYMBOLS.get("stocks")) else {
         "futures": [
@@ -860,48 +996,7 @@ async def get_symbols(background_tasks: BackgroundTasks):
         "stocks": []
     }
 
-# --- Scheduler for Data Updates ---
 scheduler = BackgroundScheduler()
-
-def daily_data_update():
-    print(f"[{datetime.datetime.now()}] Starting daily data update...")
-    # Update cached symbols first to get latest list
-    symbols = []
-    try:
-        import akshare as ak
-
-        df = ak.futures_display_main_sina()
-        symbols = df['symbol'].tolist()
-        
-        # Update symbol cache file
-        futures_list = []
-        for _, row in df.iterrows():
-            s = row['symbol']
-            multiplier = get_multiplier(s)
-            futures_list.append({
-                "code": s,
-                "name": f"{row['name']} ({s})",
-                "multiplier": multiplier
-            })
-        data_manager.save_symbols_list(futures_list)
-        
-    except Exception as e:
-        print(f"Failed to fetch symbol list during update: {e}")
-        # Fallback to some defaults or existing cache
-        symbols = [s['code'] for s in CACHED_SYMBOLS] if CACHED_SYMBOLS else ['LH0', 'SH0', 'RB0', 'M0', 'IF0']
-    
-    print(f"Found {len(symbols)} symbols to update.")
-    for symbol in symbols:
-        # Update daily data for all symbols
-        # Note: Updating minute data for ALL symbols might be too heavy. 
-        # Ideally, we only update symbols that are 'active' or 'watched'.
-        # For now, we update daily data which is fast.
-        data_manager.fetch_and_update(symbol, 'daily')
-        
-        # Uncomment to update minute data too (warning: slow)
-        # data_manager.fetch_and_update(symbol, '5') 
-        
-    print(f"[{datetime.datetime.now()}] Daily data update completed.")
 
 @app.post("/api/data/update")
 async def trigger_data_update(background_tasks: BackgroundTasks):
@@ -911,10 +1006,15 @@ async def trigger_data_update(background_tasks: BackgroundTasks):
 @app.on_event("startup")
 def start_scheduler():
     if not scheduler.running:
-        # Run at 02:00 AM every day
-        scheduler.add_job(daily_data_update, 'cron', hour=2, minute=0)
+        scheduler.add_job(daily_data_update, 'cron', hour=DATA_SYNC_CRON_HOUR, minute=DATA_SYNC_CRON_MINUTE)
         scheduler.start()
         print("Scheduler started.")
+    try:
+        loop = asyncio.get_event_loop()
+        loop.create_task(_run_startup_self_check())
+        loop.create_task(asyncio.to_thread(startup_sync_check))
+    except Exception as e:
+        print(f"Startup self-check scheduling failed: {e}")
 
 @app.on_event("shutdown")
 def stop_scheduler():

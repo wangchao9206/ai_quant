@@ -13,7 +13,8 @@ import {
     ClockCircleOutlined,
     SoundOutlined,
     SafetyCertificateOutlined,
-    GlobalOutlined
+    GlobalOutlined,
+    CompassOutlined
 } from '@ant-design/icons';
 import { Button, Dropdown } from 'antd';
 import { useLanguage } from '../contexts/LanguageContext';
@@ -65,6 +66,14 @@ const MainLayout = ({ activeKey, setActiveKey, children }) => {
                 { key: '5', icon: <RocketOutlined style={{ color: '#D500F9' }} />, label: t('menu.concept') },
             ]
         },
+        { 
+            key: 'g_yidao', 
+            type: 'group', 
+            label: '东方智慧', 
+            children: [
+                { key: '14', icon: <CompassOutlined style={{ color: '#eb2f96' }} />, label: '易道投资' },
+            ]
+        },
     ];
 
     const getTitle = () => {
@@ -85,6 +94,7 @@ const MainLayout = ({ activeKey, setActiveKey, children }) => {
             case '13': return t('header.risk_center');
 
             case '5': return t('header.wealth_cockpit');
+            case '14': return '易道投资智慧';
             default: return '';
         }
     };

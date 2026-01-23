@@ -4,12 +4,16 @@ from typing import List, Dict, Optional
 from pydantic import BaseModel
 import asyncio
 import datetime
+import os
 import threading
 import time
 import pandas as pd
-from core.tdx_client import tdx_client
+import logging
+from core.tdx_http_client import tdx_http_client
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
 
 
 _indices_cache = {"data": None, "ts": 0.0, "refreshing": False, "next": 0.0}
@@ -83,10 +87,28 @@ class IntradayData(BaseModel):
     times: List[str]
     values: List[List[float]] # [[Open, Close, Low, High], ...]
 
+def _fallback_indices() -> List[Dict]:
+    return [
+        {"name": "上证指数", "value": 0.0, "change": 0.0, "volume": "0"},
+        {"name": "深证成指", "value": 0.0, "change": 0.0, "volume": "0"},
+        {"name": "创业板指", "value": 0.0, "change": 0.0, "volume": "0"},
+        {"name": "科创50", "value": 0.0, "change": 0.0, "volume": "0"},
+    ]
+
+def _fallback_sectors() -> List[Dict]:
+    return [
+        {"name": "金融", "change": 0.0},
+        {"name": "科技", "change": 0.0},
+        {"name": "消费", "change": 0.0},
+        {"name": "医药", "change": 0.0},
+        {"name": "能源", "change": 0.0},
+    ]
+
 # --- Routes ---
 
 @router.get("/indices", response_model=List[MarketIndex])
 async def get_market_indices():
+    logger.info("API Request: /indices")
     now = time.monotonic()
     with _cache_lock:
         cached = _indices_cache["data"]
@@ -95,34 +117,143 @@ async def get_market_indices():
         next_refresh = _indices_cache["next"]
 
     if cached is not None and now - ts < 10.0:
+        logger.debug("Cache hit for /indices")
         return cached
 
     if not refreshing and now >= next_refresh:
         with _cache_lock:
             if not _indices_cache["refreshing"] and time.monotonic() >= _indices_cache["next"]:
                 _indices_cache["refreshing"] = True
-
+                
                 async def _refresh():
                     try:
-                        try:
-                            # Use TDX for indices (Real-time)
-                            data = await asyncio.to_thread(tdx_client.get_index_quotes)
-                        except Exception as e:
-                            print(f"TDX indices failed: {e}")
-                            with _cache_lock:
-                                _indices_cache["next"] = time.monotonic() + 5.0
-                            return
+                        logger.info("Refreshing indices")
+                        data = await asyncio.wait_for(asyncio.to_thread(_fetch_indices), timeout=10.0)
                         if data:
                             with _cache_lock:
                                 _indices_cache["data"] = data
                                 _indices_cache["ts"] = time.monotonic()
+                            logger.info("Indices refreshed successfully")
+                        else:
+                            with _cache_lock:
+                                _indices_cache["next"] = time.monotonic() + 10.0
+                    except Exception as e:
+                        logger.error(f"Failed to fetch indices: {e}")
+                        with _cache_lock:
+                            _indices_cache["next"] = time.monotonic() + 10.0
                     finally:
                         with _cache_lock:
                             _indices_cache["refreshing"] = False
-
+                            
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else []
+    return cached if cached is not None else _fallback_indices()
+
+def _fetch_indices() -> List[Dict]:
+    """Fetch indices with TDX HTTP priority"""
+    # 1. Try TDX HTTP
+    if tdx_http_client.is_available():
+        logger.info("Fetching indices via TDX HTTP")
+        res = _fetch_indices_tdx_http()
+        if res and len(res) >= 4:
+             return res
+        else:
+            logger.warning("TDX HTTP indices incomplete or empty, falling back")
+    
+    # 2. Fallback
+    logger.info("Fetching indices via AkShare fallback")
+    return _fetch_indices_akshare()
+
+def _fetch_indices_tdx_http() -> List[Dict]:
+    """
+    Fetch indices using tdx-api /api/index endpoint.
+    Requires prefixed codes (e.g. SH000001).
+    """
+    targets = [
+        ("SH000001", "上证指数"),
+        ("SZ399001", "深证成指"),
+        ("SZ399006", "创业板指"),
+        ("SH000688", "科创50"),
+    ]
+    results = []
+    
+    for code, name in targets:
+        # Try fetch index bars
+        data = tdx_http_client.get_index_bars(code)
+        if not data:
+            continue
+            
+        snapshot = tdx_http_client.parse_index_snapshot(data, code)
+        if snapshot:
+            # Helper to format volume/amount
+            amt = float(snapshot.get("amount", 0))
+            vol_str = f"{amt/100000000:.2f}亿" if amt > 100000000 else f"{amt:.0f}"
+            
+            results.append({
+                "name": name,
+                "value": snapshot["price"],
+                "change": snapshot["pct_change"],
+                "volume": vol_str
+            })
+            
+    return results
+
+def _fetch_indices_akshare() -> List[Dict]:
+    """Fetch market indices using AkShare (EastMoney)"""
+    logger.info("Starting AkShare indices fetch")
+    import akshare as ak
+    from core.config import DISABLE_PROXIES
+    try:
+        if DISABLE_PROXIES:
+            os.environ["NO_PROXY"] = "*"
+            os.environ["no_proxy"] = "*"
+            
+        # target indices codes
+        targets = {
+            "000001": "上证指数",
+            "399001": "深证成指",
+            "399006": "创业板指",
+            "000688": "科创50"
+        }
+        
+        # This API returns all indices, we filter locally
+        # Alternatively, we can use stock_zh_index_spot_em(symbol="...") if supported, but usually it returns a list
+        df = ak.stock_zh_index_spot_em(symbol="沪深重要指数")
+        
+        if df is None or df.empty:
+            return []
+            
+        result = []
+        for _, row in df.iterrows():
+            code = str(row.get("代码"))
+            if code in targets:
+                price = row.get("最新价")
+                change_pct = row.get("涨跌幅")
+                vol = row.get("成交额") # Use amount as volume for indices usually better
+                
+                try:
+                    price = float(price)
+                except: price = 0.0
+                
+                try:
+                    change_pct = float(change_pct)
+                except: change_pct = 0.0
+                
+                result.append({
+                    "name": targets[code],
+                    "value": price,
+                    "change": change_pct,
+                    "volume": str(vol)
+                })
+        
+        # Sort
+        order = ['上证指数', '深证成指', '创业板指', '科创50']
+        result.sort(key=lambda x: order.index(x['name']) if x['name'] in order else 99)
+        
+        return result
+    except Exception as e:
+        print(f"Error fetching indices from AkShare: {e}")
+        return []
 
 @router.get("/sectors", response_model=List[SectorInfo])
 async def get_market_sectors():
@@ -154,20 +285,30 @@ async def get_market_sectors():
                             with _cache_lock:
                                 _sectors_cache["data"] = data
                                 _sectors_cache["ts"] = time.monotonic()
+                        else:
+                            with _cache_lock:
+                                _sectors_cache["next"] = time.monotonic() + 20.0
                     finally:
                         with _cache_lock:
                             _sectors_cache["refreshing"] = False
 
                 asyncio.create_task(_refresh())
 
-    return cached if cached is not None else []
+    return cached if cached is not None else _fallback_sectors()
 
 
 def _fetch_market_sectors():
     import akshare as ak
+    from core.config import DISABLE_PROXIES
     try:
         # 东方财富行业板块
+        # Proxies are globally disabled in main.py, but we ensure it here too
+        if DISABLE_PROXIES:
+            os.environ["NO_PROXY"] = "*"
+            os.environ["no_proxy"] = "*"
+        
         df = ak.stock_board_industry_name_em()
+        
         if df is None or df.empty:
             return []
         
@@ -198,6 +339,7 @@ async def get_macro_calendar(
     date: Optional[str] = None,
     countries: Optional[str] = None # comma separated
 ):
+    logger.info(f"API Request: /macro/calendar date={date} countries={countries}")
     def _fetch_events_akshare():
         try:
             import akshare as ak

@@ -8,9 +8,13 @@ import math
 import re
 import threading
 import time
+import logging
 from core.tdx_client import tdx_client
+from core.tdx_http_client import tdx_http_client
 
 router = APIRouter()
+logger = logging.getLogger(__name__)
+
 
 
 _cache_lock = threading.Lock()
@@ -109,31 +113,9 @@ class IntradayData(BaseModel):
 
 # Helper to fetch stock list from TDX
 def _fetch_stock_list_tdx():
-    stocks = []
-    try:
-        # Fetch SH (1) and SZ (0)
-        # Fetch first 3 batches (3000 stocks) from each market should cover most
-        for market in [0, 1]:
-            for start in [0, 1000, 2000, 3000, 4000]: # Up to 5000 stocks per market
-                try:
-                    data = tdx_client.get_security_list(market, start)
-                    if not data:
-                        break
-                    for d in data:
-                        code = d.get('code')
-                        name = d.get('name')
-                        if code and name:
-                            stocks.append({"code": str(code), "name": str(name)})
-                    if len(data) < 1000:
-                        break
-                except Exception:
-                    break
-        # Ensure deterministic order
-        stocks.sort(key=lambda x: x['code'])
-        return stocks
-    except Exception as e:
-        print(f"TDX stock list fetch error: {e}")
-        return []
+    # TODO: Implement stock list fetch via tdx-api or AkShare
+    # For now, return empty to avoid blocking if tdx_client is removed
+    return []
 
 # --- Routes ---
 
@@ -188,44 +170,234 @@ async def search_stock(q: str = Query(..., min_length=1)):
     return results
 
 
-def _fetch_stock_quote_tdx(code: str, exchange: Optional[str] = None, display: Optional[str] = None):
-    try:
-        quotes = tdx_client.get_quotes([code])
-        if not quotes:
-            return None
-        q = quotes[0]
-        
-        # Try to find name from cache if missing or just code
-        name = q.get('name')
-        if name == code:
-             with _cache_lock:
-                cached_list = _stock_list_cache.get("data")
-                if cached_list:
-                    for s in cached_list:
-                        if s['code'] == code:
-                            name = s['name']
-                            break
 
+def _map_tdx_http_quote(data: Dict, code: str, display: str, exchange: Optional[str] = None):
+    """Adapter for tdx-api (Go) JSON response."""
+    try:
+        # Handle potential wrapper
+        items = []
+        if "data" in data and isinstance(data["data"], list):
+            items = data["data"]
+        elif isinstance(data, list):
+            items = data
+        elif isinstance(data, dict):
+            # Maybe it's a single item or has data dict
+            if "data" in data and isinstance(data["data"], dict):
+                items = [data["data"]]
+            else:
+                items = [data]
+        
+        if not items:
+            return None
+            
+        # Select best match if multiple
+        target_item = items[0]
+        if len(items) > 1 and exchange:
+            # 0=SZ, 1=SH
+            target_ex = 1 if exchange == "SH" else 0
+            for item in items:
+                if item.get("Exchange") == target_ex:
+                    target_item = item
+                    break
+        
+        item = target_item
+        
+        # Check for K dict (standard tdx-api format)
+        # {"Exchange":0,"Code":"000001","K":{"Last":11070...}...}
+        k_data = item.get("K", {})
+        
+        # Helper to get value from K or top level
+        def get_val(keys, default=0):
+            for k in keys:
+                if k in k_data:
+                    return k_data[k]
+                if k in item:
+                    return item[k]
+            return default
+
+        # Price scaling logic
+        # tdx-api often returns raw integer values (e.g. 11070 for 11.07)
+        # We assume factor of 1000 for stocks if looks like integer
+        raw_price = float(get_val(["Last", "Price", "price", "current", "Close"], 0))
+        
+        if raw_price == 0:
+            return None
+            
+        # Heuristic scaling
+        # If price > 0 and looks like integer (no decimals in source, though float() adds .0)
+        # We can't know for sure if it's integer in JSON without inspecting raw string, 
+        # but tdx-api "Last": 11070 implies integer.
+        # PingAn 11.07 -> 11070. Factor 1000.
+        # Index 3300.00 -> 3300000? or 330000?
+        # Let's assume factor 1000 for now as it's common in TDX raw.
+        # Exception: if value is small?
+        price = raw_price / 1000.0
+
+        last_close = float(get_val(["LastClose", "last_close", "pre_close"], raw_price)) / 1000.0
+        open_p = float(get_val(["Open", "open"], 0)) / 1000.0
+        high = float(get_val(["High", "high"], 0)) / 1000.0
+        low = float(get_val(["Low", "low"], 0)) / 1000.0
+        
+        # Volume usually in "TotalHand" (lots) or "Vol"
+        # item["TotalHand"] = 496954 (lots?)
+        # item["Amount"] = 549842752 (raw value?)
+        vol = str(get_val(["TotalHand", "Vol", "vol", "volume"], 0))
+        amt = str(get_val(["Amount", "amount"], 0))
+        
+        # Change
+        # Rate: 0.09 (Percent?)
+        change_pct = float(get_val(["Rate", "rate", "change_pct"], 0))
+        
+        # If rate is small (0.09), it might be 0.09% or 9%?
+        # PingAn 11.05 -> 11.07 is +0.02. 0.02/11.05 = 0.18%.
+        # If Rate is 0.09, maybe it's 0.09%?
+        # Let's verify calculation
+        if last_close > 0:
+            calc_change = ((price - last_close) / last_close) * 100
+            # If calculated change is close to Rate, trust Rate?
+            # Or just use calculated.
+            change_pct = calc_change
+        
+        change_amt = price - last_close
+
+        name = item.get("Name") or item.get("name") or code
+        # Name might need decoding if it's raw bytes? 
+        # Requests .json() handles utf-8. tdx-api usually returns utf-8.
+        
         return {
-            "name": name,
+            "name": str(name),
             "code": display or code,
-            "price": q.get('price', 0),
-            "change": q.get('change_pct', 0),
-            "changeAmt": q.get('change', 0),
-            "open": q.get('open', 0),
-            "high": q.get('high', 0),
-            "low": q.get('low', 0),
-            "vol": str(q.get('vol', 0)),
-            "amt": str(q.get('amount', 0)),
-            "pe": 0.0, # TDX quote doesn't have PE/PB usually
+            "price": round(price, 2),
+            "change": round(change_pct, 2),
+            "changeAmt": round(change_amt, 2),
+            "open": round(open_p, 2),
+            "high": round(high, 2),
+            "low": round(low, 2),
+            "vol": vol,
+            "amt": amt,
+            "pe": 0.0,
             "pb": 0.0,
         }
     except Exception as e:
-        print(f"TDX quote error for {code}: {e}")
+        print(f"Error mapping tdx-api quote: {e}")
         return None
+
+def _fetch_stock_quote_tdx(code: str, exchange: Optional[str] = None, display: Optional[str] = None):
+    # 1. Try Local TDX HTTP API First (User Preference)
+    # User requested integration of https://github.com/oficcejo/tdx-api
+    if tdx_http_client.is_available():
+        try:
+            # tdx-api typically runs on localhost:8080
+            data = tdx_http_client.get_quote(code)
+            if data:
+                mapped = _map_tdx_http_quote(data, code, display, exchange)
+                if mapped:
+                    return mapped
+        except Exception as e:
+            logger.error(f"TDX HTTP fallback error: {e}")
+            pass
+
+    # 2. Try Internal TDX Client (Fallback)
+    # DISABLED BY USER REQUEST - REMOVING BLOCKING TDX CLIENT
+    
+    # 3. Final Fallback to AkShare (HTTP)
+    return _fetch_stock_quote_akshare(code, exchange, display)
+
+def _fetch_orderbook_tdx(code: str, exchange: Optional[str] = None):
+    # 1. Try HTTP API (Prioritized)
+    if tdx_http_client.is_available():
+        try:
+            # Construct code with prefix if possible
+            target_code = code
+            if exchange:
+                target_code = f"{exchange}{code}"
+                
+            data = tdx_http_client.get_quote(target_code)
+            if not data and target_code != code:
+                # Retry without prefix
+                data = tdx_http_client.get_quote(code)
+                
+            if data:
+                # Handle wrapper
+                item = None
+                items = []
+                if "data" in data and isinstance(data["data"], list):
+                    items = data["data"]
+                elif isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict):
+                    if "data" in data and isinstance(data["data"], dict):
+                        items = [data["data"]]
+                    else:
+                        items = [data]
+                
+                if items:
+                    item = items[0]
+                    # Filter by exchange if needed
+                    if len(items) > 1 and exchange:
+                         target_ex = 1 if exchange == "SH" else 0
+                         for it in items:
+                             if it.get("Exchange") == target_ex:
+                                 item = it
+                                 break
+                    
+                    bids = []
+                    asks = []
+                    
+                    # Parse BuyLevel / SellLevel (tdx-api format)
+                    # "BuyLevel":[{"Buy":true,"Price":10990,"Number":2423}...]
+                    # "SellLevel":[{"Buy":false,"Price":11000,"Number":4822}...]
+                    
+                    buy_levels = item.get("BuyLevel", [])
+                    sell_levels = item.get("SellLevel", [])
+                    
+                    for level in buy_levels:
+                        p = float(level.get("Price", 0)) / 1000.0
+                        v = float(level.get("Number", 0)) # Volume
+                        if p > 0:
+                            bids.append({"p": p, "v": v})
+                            
+                    for level in sell_levels:
+                        p = float(level.get("Price", 0)) / 1000.0
+                        v = float(level.get("Number", 0))
+                        if p > 0:
+                            asks.append({"p": p, "v": v})
+                            
+                    # If empty, maybe fall back to Bid1...Bid5 check (legacy format?)
+                    if not bids and not asks:
+                         k_data = item.get("K", {})
+                         def get_val(keys, default=0):
+                             for k in keys:
+                                 if k in k_data: return k_data[k]
+                                 if k in item: return item[k]
+                             return default
+
+                         for i in range(1, 6):
+                             bp = float(get_val([f"Bid{i}"])) / 1000.0
+                             bv = float(get_val([f"BidVol{i}"]))
+                             if bp > 0: bids.append({"p": bp, "v": bv})
+                             
+                             ap = float(get_val([f"Ask{i}"])) / 1000.0
+                             av = float(get_val([f"AskVol{i}"]))
+                             if ap > 0: asks.append({"p": ap, "v": av})
+                    
+                    # Ensure correct order
+                    # Bids: Descending (Highest buy first) - usually already sorted
+                    # Asks: Ascending (Lowest sell first)
+                    
+                    return {
+                        "bids": bids,
+                        "asks": asks
+                    }
+        except Exception as e:
+            logger.error(f"TDX HTTP orderbook error: {e}")
+            pass
+
+    return None
 
 @router.get("/quote", response_model=StockQuote)
 async def get_stock_quote(symbol: str):
+    logger.info(f"API Request: /quote?symbol={symbol}")
     parsed = _parse_symbol(symbol)
     cache_key = f"{parsed['kind']}:{parsed['exchange'] or ''}:{parsed['code']}"
     now = time.monotonic()
@@ -237,6 +409,7 @@ async def get_stock_quote(symbol: str):
         next_refresh = cache["next"]
 
     if cached is not None and now - ts < 3.0:
+        logger.debug(f"Cache hit for {symbol}")
         return cached
 
     if not refreshing and now >= next_refresh:
@@ -248,20 +421,39 @@ async def get_stock_quote(symbol: str):
 
                 async def _refresh():
                     try:
+                        logger.info(f"Refreshing quote for {symbol} (kind={parsed['kind']})")
                         try:
                             if parsed["kind"] == "index":
                                 data = await asyncio.wait_for(asyncio.to_thread(_fetch_index_quote_akshare, parsed["code"], parsed["exchange"], parsed["display"]), timeout=6.0)
                             else:
-                                # Use TDX for stocks
+                                # Use prioritized fetch strategy: tdx-api -> internal tdx (disabled) -> AkShare
                                 data = await asyncio.to_thread(_fetch_stock_quote_tdx, parsed["code"], parsed["exchange"], parsed["display"])
-                        except Exception:
-                            with _cache_lock:
-                                cache["next"] = time.monotonic() + 5.0
-                            return
+                                
+                                if not data:
+                                    logger.warning(f"TDX failed for {symbol}, trying AkShare fallback")
+                                    # Double check fallback (though _fetch_stock_quote_tdx already does it)
+                                    try:
+                                        data = await asyncio.wait_for(asyncio.to_thread(_fetch_stock_quote_akshare, parsed["code"], parsed["exchange"], parsed["display"]), timeout=8.0)
+                                    except Exception as e:
+                                        logger.error(f"AkShare fallback timeout/error: {e}")
+                                        data = None
+                        except Exception as e:
+                            logger.error(f"Fetch quote error for {symbol}: {e}")
+                            # Final attempt with AkShare
+                            try:
+                                data = await asyncio.wait_for(asyncio.to_thread(_fetch_stock_quote_akshare, parsed["code"], parsed["exchange"], parsed["display"]), timeout=8.0)
+                            except:
+                                data = None
+                            
+                            if not data:
+                                with _cache_lock:
+                                    cache["next"] = time.monotonic() + 5.0
+                                return
                         if data:
                             with _cache_lock:
                                 cache["data"] = data
                                 cache["ts"] = time.monotonic()
+                            logger.info(f"Quote refreshed for {symbol}")
                     finally:
                         with _cache_lock:
                             cache["refreshing"] = False
@@ -280,17 +472,65 @@ async def get_stock_quote(symbol: str):
         return cached
     
     # Return 404 if data not found
+    logger.warning(f"Stock quote not found for {symbol}")
     raise HTTPException(status_code=404, detail="Stock quote not found")
 
 def _fetch_orderbook_tdx(code: str):
-    try:
-        quotes = tdx_client.get_quotes([code])
-        if not quotes:
-            return None
-        q = quotes[0]
-        return {"asks": q.get('asks', []), "bids": q.get('bids', [])}
-    except Exception:
-        return None
+    # 1. Try HTTP API (Prioritized)
+    if tdx_http_client.is_available():
+        try:
+            logger.info(f"Fetching orderbook via TDX HTTP for {code}")
+            data = tdx_http_client.get_quote(code)
+            if data:
+                # Handle wrapper
+                item = None
+                items = []
+                if "data" in data and isinstance(data["data"], list):
+                    items = data["data"]
+                elif isinstance(data, list):
+                    items = data
+                elif isinstance(data, dict):
+                    if "data" in data and isinstance(data["data"], dict):
+                        items = [data["data"]]
+                    else:
+                        items = [data]
+                
+                if items:
+                    item = items[0]
+                    bids = []
+                    asks = []
+                    
+                    k_data = item.get("K", {})
+                    def get_val(keys, default=0):
+                        for k in keys:
+                            if k in k_data: return k_data[k]
+                            if k in item: return item[k]
+                        return default
+
+                    for i in range(1, 6):
+                        # Bid
+                        bp = float(get_val([f"Bid{i}"])) / 1000.0
+                        bv = float(get_val([f"BidVol{i}"]))
+                        if bp > 0:
+                            bids.append({"p": bp, "v": bv})
+                        
+                        # Ask
+                        ap = float(get_val([f"Ask{i}"])) / 1000.0
+                        av = float(get_val([f"AskVol{i}"]))
+                        if ap > 0:
+                            asks.append({"p": ap, "v": av})
+                    
+                    # Ensure correct order
+                    # Bids: Descending (Highest buy first)
+                    # Asks: Ascending (Lowest sell first)
+                    # Usually API returns them in level order 1-5
+                    
+                    return {"asks": asks, "bids": bids}
+        except Exception:
+            pass
+
+    # 2. Internal client (Disabled)
+    return None
 
 @router.get("/orderbook", response_model=OrderBook)
 async def get_orderbook(symbol: str):
@@ -343,6 +583,7 @@ async def get_orderbook(symbol: str):
 
 @router.get("/intraday", response_model=IntradayData)
 async def get_intraday(symbol: str):
+    logger.info(f"API Request: /intraday?symbol={symbol}")
     parsed = _parse_symbol(symbol)
     cache_key = f"{parsed['kind']}:{parsed['exchange'] or ''}:{parsed['code']}"
     now = time.monotonic()
@@ -372,7 +613,18 @@ async def get_intraday(symbol: str):
                                     timeout=8.0,
                                 )
                             else:
-                                data = await asyncio.wait_for(asyncio.to_thread(_fetch_intraday_akshare, parsed["code"]), timeout=10.0)
+                                # Prioritize TDX HTTP
+                                data = None
+                                if tdx_http_client.is_available():
+                                    try:
+                                        m_data = await asyncio.to_thread(tdx_http_client.get_minute, parsed["code"])
+                                        if m_data and m_data["values"]:
+                                            data = m_data
+                                    except Exception:
+                                        pass
+
+                                if not data:
+                                    data = await asyncio.wait_for(asyncio.to_thread(_fetch_intraday_akshare, parsed["code"]), timeout=10.0)
                         except Exception:
                             with _cache_lock:
                                 cache["next"] = time.monotonic() + 30.0

@@ -16,6 +16,7 @@ import MarketReplay from './components/tools/MarketReplay';
 import MacroCalendar from './components/tools/MacroCalendar';
 import SentimentRadar from './components/tools/SentimentRadar';
 import RiskCenter from './components/tools/RiskCenter';
+import YiDaoDashboard from './components/YiDaoDashboard';
 import './App.css';
 import { LanguageProvider } from './contexts/LanguageContext';
 
@@ -109,6 +110,10 @@ const InnerApp = () => {
                 return <SentimentRadar />;
             case '13':
                 return <RiskCenter />;
+            
+            // --- Yi Dao ---
+            case '14':
+                return <YiDaoDashboard />;
 
             // --- Wealth ---
             case '5':
